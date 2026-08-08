@@ -1,0 +1,23 @@
+# CMake and Visual Studio output
+/build/
+/.vs/
+*.sln
+*.vcxproj*
+*.VC.db
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+*.exe
+
+# Local application data and test artifacts
+*.tmp
+*.corrupt-*
+settings.conf
+exposure.dat
+app.log
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
