@@ -23,6 +23,9 @@ enum class LocaleHourMode : std::uint8_t {
     std::chrono::system_clock::time_point now);
 [[nodiscard]] std::chrono::system_clock::time_point nextSecondBoundary(
     std::chrono::system_clock::time_point now);
+[[nodiscard]] std::chrono::milliseconds evenlySpacedShiftOffset(int movementIntervalSeconds,
+                                                                 int shiftCount,
+                                                                 int zeroBasedShiftIndex) noexcept;
 [[nodiscard]] LocaleHourMode localeHourModeFromPattern(const std::wstring& shortTimePattern) noexcept;
 
 } // namespace aoc::core

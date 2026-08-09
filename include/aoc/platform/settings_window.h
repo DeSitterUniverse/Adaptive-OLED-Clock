@@ -8,13 +8,15 @@
 
 #include <array>
 #include <functional>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace aoc::platform {
 
 class SettingsWindow {
 public:
-    using ApplyCallback = std::function<void(const core::Settings&, bool committed)>;
+    using ApplyCallback = std::function<void(const core::Settings&)>;
     using SimpleCallback = std::function<void()>;
 
     SettingsWindow() = default;
@@ -24,9 +26,11 @@ public:
     SettingsWindow& operator=(const SettingsWindow&) = delete;
 
     [[nodiscard]] bool create(HINSTANCE instance, HWND owner, ApplyCallback onApply,
-                              SimpleCallback onReset, SimpleCallback onPreset,
                               SimpleCallback onPositioning, SimpleCallback onStatistics);
     void show(const core::Settings& settings, const std::vector<core::MonitorInfo>& monitors);
+    void syncApplied(const core::Settings& settings,
+                     const std::vector<core::MonitorInfo>& monitors,
+                     bool force);
     void hide();
     [[nodiscard]] bool visible() const noexcept { return hwnd_ != nullptr && IsWindowVisible(hwnd_) != FALSE; }
     [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
@@ -38,7 +42,6 @@ private:
     bool createClockPage();
     bool createMovementPage();
     bool createDisplayPage();
-    bool createStatisticsPage();
     void layoutControls(int width, int height);
     void setActiveTab(int tab);
     void syncToControls();
@@ -49,16 +52,16 @@ private:
     void readMovementPage(core::Settings& next) const;
     void readDisplayPage(core::Settings& next) const;
     void applyFromControls(bool committed = true);
-    void addExcludedArea();
-    void removeSelectedExcludedArea();
-    void clearExcludedAreas();
-    void updateExcludedList();
     void chooseTextColor();
-    void updateSliderLabels();
-    void updateAllowedAreaEditorState();
+    void updateMovementEditorState();
+    void loadInstalledFonts();
+    void markPendingEdit(HWND control);
+    void clearPendingEdits();
     void scrollBy(int amount);
     void setScrollOffset(int offset);
-    void schedulePreviewApply();
+    void applyVisualTheme();
+    void drawButton(const DRAWITEMSTRUCT& item) const;
+    void drawTab(const DRAWITEMSTRUCT& item) const;
     static LRESULT CALLBACK pageControlSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
     [[nodiscard]] int scale(int value) const noexcept;
     [[nodiscard]] HWND addControl(int page, DWORD style, const wchar_t* className,
@@ -75,8 +78,6 @@ private:
     HWND owner_{nullptr};
     HWND hwnd_{nullptr};
     ApplyCallback onApply_;
-    SimpleCallback onReset_;
-    SimpleCallback onPreset_;
     SimpleCallback onPositioning_;
     SimpleCallback onStatistics_;
     core::Settings settings_{};
@@ -85,12 +86,15 @@ private:
     int activeTab_{0};
     UINT dpi_{96};
     UniqueGdiFont controlFont_;
-    std::array<PageControls, 4> pages_;
+    UniqueGdiFont titleFont_;
+    std::array<PageControls, 3> pages_;
     std::vector<HWND> allControls_;
     bool controlCreationFailed_{false};
 
     HWND tabs_{nullptr};
     HWND pageHost_{nullptr};
+    HWND titleLabel_{nullptr};
+    HWND subtitleLabel_{nullptr};
     HWND timeFormatLabel_{nullptr};
     HWND timeFormat_{nullptr};
     HWND showAmPm_{nullptr};
@@ -116,15 +120,23 @@ private:
 
     HWND movementMode_{nullptr};
     HWND movementModeLabel_{nullptr};
-    HWND interval_{nullptr};
+    HWND localAreaRadius_{nullptr};
+    HWND localAreaRadiusLabel_{nullptr};
+    HWND localAreaHelp_{nullptr};
+    HWND intervalHours_{nullptr};
+    HWND intervalMinutes_{nullptr};
+    HWND intervalSeconds_{nullptr};
     HWND intervalLabel_{nullptr};
+    HWND intervalHoursLabel_{nullptr};
+    HWND intervalMinutesLabel_{nullptr};
+    HWND intervalSecondsLabel_{nullptr};
     HWND microShiftEnabled_{nullptr};
-    HWND microShiftRadius_{nullptr};
-    HWND microShiftRadiusLabel_{nullptr};
-    HWND microShiftRadiusValue_{nullptr};
+    HWND microShiftCount_{nullptr};
+    HWND microShiftCountLabel_{nullptr};
+    HWND microShiftDistance_{nullptr};
+    HWND microShiftDistanceLabel_{nullptr};
     HWND edgeMargin_{nullptr};
     HWND edgeMarginLabel_{nullptr};
-    HWND edgeMarginValue_{nullptr};
     HWND allowedPreset_{nullptr};
     HWND allowedPresetLabel_{nullptr};
     HWND allowedAreaHelp_{nullptr};
@@ -136,17 +148,6 @@ private:
     HWND allowedTop_{nullptr};
     HWND allowedRight_{nullptr};
     HWND allowedBottom_{nullptr};
-    HWND preferredEnabled_{nullptr};
-    HWND preferredSummary_{nullptr};
-    HWND excludedAreaLabel_{nullptr};
-    HWND excludedLeft_{nullptr};
-    HWND excludedTop_{nullptr};
-    HWND excludedRight_{nullptr};
-    HWND excludedBottom_{nullptr};
-    HWND excludedList_{nullptr};
-    HWND excludedAdd_{nullptr};
-    HWND excludedRemove_{nullptr};
-    HWND excludedClear_{nullptr};
 
     HWND monitorMode_{nullptr};
     HWND monitorModeLabel_{nullptr};
@@ -155,11 +156,8 @@ private:
     HWND hotkey_{nullptr};
     HWND displayHelp_{nullptr};
 
-    HWND statisticsExplanation_{nullptr};
-    HWND statisticsHelp_{nullptr};
-
     HWND statisticsButton_{nullptr};
-    HWND autoSaveLabel_{nullptr};
+    HWND statusLabel_{nullptr};
     HWND resetButton_{nullptr};
     HWND presetButton_{nullptr};
     HWND positioningButton_{nullptr};
@@ -167,7 +165,10 @@ private:
 
     int verticalOffset_{0};
     int scrollMaximum_{0};
-    bool sliderTracking_{false};
+    int footerTop_{0};
+    bool dirty_{false};
+    std::vector<std::wstring> installedFonts_;
+    std::unordered_set<HWND> pendingEdits_;
 };
 
 } // namespace aoc::platform

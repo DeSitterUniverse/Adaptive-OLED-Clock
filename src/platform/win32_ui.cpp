@@ -1,4 +1,5 @@
 #include "aoc/platform/win32_ui.h"
+#include "aoc_resources.h"
 
 #include <algorithm>
 
@@ -12,6 +13,12 @@ HFONT createControlFont(UINT dpi) noexcept {
     return CreateFontW(-scaleDip(14, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+HICON loadApplicationIcon(HINSTANCE instance, int width, int height) noexcept {
+    HICON icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_AOC_APP), IMAGE_ICON,
+                                               width, height, LR_DEFAULTCOLOR | LR_SHARED));
+    return icon ? icon : LoadIconW(nullptr, IDI_APPLICATION);
 }
 
 void setControlFont(HWND control, HFONT font, bool redraw) noexcept {

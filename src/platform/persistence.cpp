@@ -32,6 +32,10 @@ DataPaths resolveDataPaths() {
 }
 
 bool readUtf8File(const std::filesystem::path& path, std::string& contents) {
+    constexpr std::uintmax_t kMaximumDataFileBytes = 8U * 1024U * 1024U;
+    std::error_code sizeError;
+    const std::uintmax_t size = std::filesystem::file_size(path, sizeError);
+    if (sizeError || size > kMaximumDataFileBytes) return false;
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
     contents.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());

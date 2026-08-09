@@ -21,6 +21,13 @@ std::string utf8(const std::wstring& text) {
 Logger::Logger(std::filesystem::path path) : path_(std::move(path)) {
     try {
         std::filesystem::create_directories(path_.parent_path());
+        constexpr std::uintmax_t kMaximumLogBytes = 2U * 1024U * 1024U;
+        std::error_code sizeError;
+        if (std::filesystem::file_size(path_, sizeError) > kMaximumLogBytes && !sizeError) {
+            const std::filesystem::path previous = path_.wstring() + L".previous";
+            (void)MoveFileExW(path_.c_str(), previous.c_str(),
+                              MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        }
     } catch (...) {
     }
 }

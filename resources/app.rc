@@ -1,0 +1,5 @@
+#include <windows.h>
+#include "aoc_resources.h"
+
+1 RT_MANIFEST "app.manifest"
+IDI_AOC_APP ICON "app-icon.ico"

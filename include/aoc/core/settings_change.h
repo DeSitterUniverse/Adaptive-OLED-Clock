@@ -11,6 +11,7 @@ struct SettingsChange {
     bool placementPolicyChanged{false};
     bool monitorSelectionChanged{false};
     bool movementIntervalChanged{false};
+    bool microShiftChanged{false};
     bool hotkeyChanged{false};
     bool startupChanged{false};
     bool anyChanged{false};

@@ -11,6 +11,8 @@
 namespace aoc::core {
 namespace {
 
+constexpr std::size_t kMaximumMonitorHistories = 128;
+
 std::string escapeKey(const std::string& key) {
     std::ostringstream output;
     output << std::uppercase << std::hex;
@@ -124,6 +126,9 @@ double ExposureMap::imbalance() const noexcept {
 }
 
 ExposureMap& ExposureStore::forMonitor(const std::string& stableKey) {
+    if (!maps_.contains(stableKey) && maps_.size() >= kMaximumMonitorHistories) {
+        maps_.erase(maps_.begin());
+    }
     return maps_[stableKey];
 }
 
@@ -208,7 +213,7 @@ ExposureLoadResult deserializeExposure(const std::string& text) {
     } catch (...) {
         syntaxOk = false;
     }
-    if (!syntaxOk || version != 1 || count < 0 || count > 1000) {
+    if (!syntaxOk || version != 1 || count < 0 || count > static_cast<int>(kMaximumMonitorHistories)) {
         result.recovered = true;
         result.error = version == 1 ? "exposure file was malformed" : "unsupported exposure version";
         return result;

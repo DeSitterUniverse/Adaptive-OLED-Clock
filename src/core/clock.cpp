@@ -56,6 +56,15 @@ std::chrono::system_clock::time_point nextSecondBoundary(
     return second + std::chrono::seconds(1);
 }
 
+std::chrono::milliseconds evenlySpacedShiftOffset(int movementIntervalSeconds,
+                                                   int shiftCount,
+                                                   int zeroBasedShiftIndex) noexcept {
+    if (movementIntervalSeconds < 1 || shiftCount < 1 || zeroBasedShiftIndex < 0 ||
+        zeroBasedShiftIndex >= shiftCount) return std::chrono::milliseconds::zero();
+    const auto total = std::chrono::milliseconds(static_cast<long long>(movementIntervalSeconds) * 1000LL);
+    return total * (zeroBasedShiftIndex + 1) / (shiftCount + 1);
+}
+
 LocaleHourMode localeHourModeFromPattern(const std::wstring& shortTimePattern) noexcept {
     if (shortTimePattern.find(L'h') != std::wstring::npos ||
         shortTimePattern.find(L't') != std::wstring::npos) {

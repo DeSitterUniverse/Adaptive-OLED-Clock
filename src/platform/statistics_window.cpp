@@ -20,8 +20,9 @@ constexpr int kCloseId = 6103;
 const wchar_t* modeName(core::MovementMode mode) {
     switch (mode) {
     case core::MovementMode::WholeScreen: return L"Whole screen";
-    case core::MovementMode::LocalWander: return L"Local wander";
-    case core::MovementMode::EdgeOnly: return L"Edge-only";
+    case core::MovementMode::LocalWander: return L"Local area";
+    case core::MovementMode::EdgeOnly: return L"Edge only";
+    case core::MovementMode::FourCorners: return L"Four corners";
     default: return L"Unknown";
     }
 }
@@ -44,11 +45,13 @@ bool StatisticsWindow::create(HINSTANCE instance, HWND owner, SimpleCallback onR
     windowClass.lpfnWndProc = &StatisticsWindow::windowProc;
     windowClass.lpszClassName = kStatisticsClass;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hIcon = loadApplicationIcon(instance_, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    windowClass.hIconSm = loadApplicationIcon(instance_, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
     // The controller is HWND_MESSAGE-only. Statistics is deliberately a regular
     // top-level window so it remains discoverable and keyboard-accessible.
-    hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kStatisticsClass, L"Adaptive OLED Clock - Exposure Statistics",
+    hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kStatisticsClass, L"Adaptive OLED Clock - Movement History",
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX,
                             CW_USEDEFAULT, CW_USEDEFAULT, 720, 600, nullptr, nullptr, instance_, this);
     if (!hwnd_) return false;
@@ -62,9 +65,9 @@ bool StatisticsWindow::create(HINSTANCE instance, HWND owner, SimpleCallback onR
     leastLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
     imbalanceLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
     modeLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
-    resetButton_ = CreateWindowExW(0, L"BUTTON", L"Reset exposure history...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    resetButton_ = CreateWindowExW(0, L"BUTTON", L"Clear history...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                    0, 0, 170, 30, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResetId)), instance_, nullptr);
-    exportButton_ = CreateWindowExW(0, L"BUTTON", L"Export CSV...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    exportButton_ = CreateWindowExW(0, L"BUTTON", L"Save CSV...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                     0, 0, 120, 30, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kExportId)), instance_, nullptr);
     closeButton_ = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                    0, 0, 90, 30, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCloseId)), instance_, nullptr);
@@ -144,17 +147,23 @@ void StatisticsWindow::updateSummary() {
     if (!map) map = &empty;
     const auto least = map->leastExposedCell();
     const auto most = map->mostExposedCell();
+    const double trackedMinutes = map->totalSeconds() / 60.0;
     std::wostringstream total;
-    total << L"Charged visible time: " << std::fixed << std::setprecision(1) << map->totalSeconds() << L" seconds";
+    total << L"Time tracked: " << std::fixed << std::setprecision(1) << trackedMinutes << L" minutes";
     std::wostringstream leastText;
-    leastText << L"Least exposed cell: column " << least.first + 1 << L", row " << least.second + 1;
     std::wostringstream imbalance;
-    imbalance << L"Imbalance: " << std::fixed << std::setprecision(1) << map->imbalance() * 100.0
-              << L"% (most exposed cell: column " << most.first + 1 << L", row " << most.second + 1 << L")";
+    if (trackedMinutes < 5.0) {
+        leastText << L"Least-used area: available after 5 minutes";
+        imbalance << L"Coverage: collecting more history";
+    } else {
+        leastText << L"Least-used area: column " << least.first + 1 << L", row " << least.second + 1;
+        imbalance << L"Coverage difference: " << std::fixed << std::setprecision(1) << map->imbalance() * 100.0
+                  << L"% (most-used area: column " << most.first + 1 << L", row " << most.second + 1 << L")";
+    }
     SetWindowTextW(totalLabel_, total.str().c_str());
     SetWindowTextW(leastLabel_, leastText.str().c_str());
     SetWindowTextW(imbalanceLabel_, imbalance.str().c_str());
-    std::wstring modeText = L"Current movement mode: ";
+    std::wstring modeText = L"Movement: ";
     modeText += modeName(mode_);
     SetWindowTextW(modeLabel_, modeText.c_str());
 }
@@ -217,10 +226,31 @@ void StatisticsWindow::paintHeatmap(HDC dc, const RECT&) {
     if (!map) map = &empty;
     double maximum = 0.0;
     for (double value : map->seconds) maximum = std::max(maximum, value);
-    const int heatmapWidth = static_cast<int>(heatmapRect_.right - heatmapRect_.left);
-    const int heatmapHeight = static_cast<int>(heatmapRect_.bottom - heatmapRect_.top);
-    const int cellWidth = std::max(1, heatmapWidth / static_cast<int>(core::kExposureColumns));
-    const int cellHeight = std::max(1, heatmapHeight / static_cast<int>(core::kExposureRows));
+    const int axisWidth = scale(28);
+    const int axisHeight = scale(20);
+    const RECT grid{heatmapRect_.left + axisWidth, heatmapRect_.top + axisHeight,
+                    heatmapRect_.right, heatmapRect_.bottom};
+    const int heatmapWidth = std::max(1, static_cast<int>(grid.right - grid.left));
+    const int heatmapHeight = std::max(1, static_cast<int>(grid.bottom - grid.top));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+    const HGDIOBJ previousFont = controlFont_ ? SelectObject(dc, controlFont_.get()) : nullptr;
+    for (std::size_t column = 0; column < core::kExposureColumns; ++column) {
+        RECT label{grid.left + static_cast<int>(column) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                   heatmapRect_.top,
+                   grid.left + static_cast<int>(column + 1) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                   grid.top};
+        const std::wstring text = std::to_wstring(column + 1);
+        DrawTextW(dc, text.c_str(), -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    for (std::size_t row = 0; row < core::kExposureRows; ++row) {
+        RECT label{heatmapRect_.left,
+                   grid.top + static_cast<int>(row) * heatmapHeight / static_cast<int>(core::kExposureRows),
+                   grid.left - scale(5),
+                   grid.top + static_cast<int>(row + 1) * heatmapHeight / static_cast<int>(core::kExposureRows)};
+        const std::wstring text = std::to_wstring(row + 1);
+        DrawTextW(dc, text.c_str(), -1, &label, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
     for (std::size_t row = 0; row < core::kExposureRows; ++row) {
         for (std::size_t column = 0; column < core::kExposureColumns; ++column) {
             const double intensity = maximum <= 0.0 ? 0.0 : map->cell(column, row) / maximum;
@@ -228,16 +258,17 @@ void StatisticsWindow::paintHeatmap(HDC dc, const RECT&) {
             const BYTE green = static_cast<BYTE>(std::clamp(170.0 - intensity * 125.0, 0.0, 255.0));
             const BYTE blue = static_cast<BYTE>(std::clamp(225.0 - intensity * 155.0, 0.0, 255.0));
             const COLORREF color = RGB(red, green, blue);
-            RECT cell{heatmapRect_.left + static_cast<int>(column) * cellWidth,
-                      heatmapRect_.top + static_cast<int>(row) * cellHeight,
-                      heatmapRect_.left + static_cast<int>(column + 1) * cellWidth,
-                      heatmapRect_.top + static_cast<int>(row + 1) * cellHeight};
+            RECT cell{grid.left + static_cast<int>(column) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                      grid.top + static_cast<int>(row) * heatmapHeight / static_cast<int>(core::kExposureRows),
+                      grid.left + static_cast<int>(column + 1) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                      grid.top + static_cast<int>(row + 1) * heatmapHeight / static_cast<int>(core::kExposureRows)};
             HBRUSH brush = CreateSolidBrush(color);
             FillRect(dc, &cell, brush);
             DeleteObject(brush);
             FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
     }
+    if (previousFont) SelectObject(dc, previousFont);
 }
 
 LRESULT CALLBACK StatisticsWindow::windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -292,6 +323,12 @@ LRESULT StatisticsWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPar
     case WM_SIZE:
         layoutControls(LOWORD(lParam), HIWORD(lParam));
         return 0;
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
     case WM_COMMAND: {
         const int id = LOWORD(wParam);
         const int notification = HIWORD(wParam);

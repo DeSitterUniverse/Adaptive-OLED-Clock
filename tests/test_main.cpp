@@ -100,6 +100,14 @@ void testClockFormattingAndBoundaries() {
               .count());
     const auto exactSecond = system_clock::time_point{} + seconds(30);
     CHECK(aoc::core::nextSecondBoundary(exactSecond) == system_clock::time_point{} + seconds(31));
+
+    beginScenario("small shifts divide each major-movement cycle evenly, including subsecond offsets");
+    CHECK(aoc::core::evenlySpacedShiftOffset(10, 3, 0) == milliseconds(2500));
+    CHECK(aoc::core::evenlySpacedShiftOffset(10, 3, 1) == milliseconds(5000));
+    CHECK(aoc::core::evenlySpacedShiftOffset(10, 3, 2) == milliseconds(7500));
+    CHECK(aoc::core::evenlySpacedShiftOffset(1, 3, 0) == milliseconds(250));
+    CHECK(aoc::core::evenlySpacedShiftOffset(1, 3, 2) == milliseconds(750));
+    CHECK(aoc::core::evenlySpacedShiftOffset(10, 0, 0) == milliseconds::zero());
 }
 
 void testGeometryAndDpi() {
@@ -131,38 +139,50 @@ void testGeometryAndDpi() {
 }
 
 void testSettingsDefaultsMigrationAndRecovery() {
-    beginScenario("settings defaults and OLED-safe preset retain conservative movement policy");
+    beginScenario("settings defaults and OLED preset retain a slow edge-only movement policy");
     const auto defaults = aoc::core::Settings::defaults();
     CHECK(defaults.version == aoc::core::kCurrentSettingsVersion);
-    CHECK_NEAR(defaults.opacity, 0.45, kTolerance);
+    CHECK_NEAR(defaults.opacity, 0.80, kTolerance);
+    CHECK(defaults.textColor == aoc::core::Color{255, 255, 255, 255});
+    CHECK_NEAR(defaults.boostOpacity, 1.0, kTolerance);
     CHECK(defaults.movementMode == aoc::core::MovementMode::EdgeOnly);
+    CHECK(defaults.movementIntervalSeconds == 3600);
     CHECK(defaults.microShiftEnabled);
+    CHECK(defaults.microShiftCount == 3);
+    CHECK(defaults.microShiftDistancePx == 3);
+    CHECK(defaults.localAreaRadiusPx == 100);
+    CHECK(!defaults.localAreaAnchorSet);
+    CHECK_NEAR(defaults.edgeMarginDip, 0.0, kTolerance);
     CHECK(defaults.showDate == false);
     CHECK(defaults.showSeconds == false);
 
-    const auto safe = aoc::core::Settings::oledSafePreset();
+    const auto safe = aoc::core::Settings::oledPreset();
     CHECK(safe.movementMode == aoc::core::MovementMode::EdgeOnly);
-    CHECK(safe.opacity < defaults.opacity);
-    CHECK(safe.boostOpacity < defaults.boostOpacity);
+    CHECK_NEAR(safe.opacity, 0.50, kTolerance);
+    CHECK(safe.textColor == aoc::core::Color{176, 176, 176, 255});
+    CHECK_NEAR(safe.boostOpacity, 1.0, kTolerance);
     CHECK(safe.boostDurationSeconds <= defaults.boostDurationSeconds);
-    CHECK(safe.microShiftRadiusDip <= defaults.microShiftRadiusDip);
-    CHECK(safe.edgeMarginDip >= defaults.edgeMarginDip);
+    CHECK(safe.movementIntervalSeconds == 1800);
+    CHECK(safe.microShiftEnabled);
+    CHECK(safe.microShiftCount == 4);
+    CHECK(safe.microShiftDistancePx == 5);
+    CHECK_NEAR(safe.edgeMarginDip, 0.0, kTolerance);
 
-    beginScenario("schema-v2 minimal files preserve the 45 percent Edge-only defaults");
+    beginScenario("schema-v6 minimal files preserve the 80 percent white Edge-only defaults");
     const auto defaultText = aoc::core::serializeSettings(defaults);
-    CHECK(defaultText.find("version=2\n") != std::string::npos);
+    CHECK(defaultText.find("version=6\n") != std::string::npos);
     const auto defaultRoundTrip = aoc::core::deserializeSettings(defaultText);
     CHECK(!defaultRoundTrip.recovered);
     CHECK(!defaultRoundTrip.migrated);
-    CHECK_NEAR(defaultRoundTrip.value.opacity, 0.45, kTolerance);
+    CHECK_NEAR(defaultRoundTrip.value.opacity, 0.80, kTolerance);
     CHECK(defaultRoundTrip.value.movementMode == aoc::core::MovementMode::EdgeOnly);
     CHECK(defaultRoundTrip.value.allowedArea == aoc::core::NormalizedRect{0.0, 0.0, 1.0, 1.0});
-    const auto minimalV2 = aoc::core::deserializeSettings("version=2\n");
-    CHECK(!minimalV2.recovered);
-    CHECK(!minimalV2.migrated);
-    CHECK_NEAR(minimalV2.value.opacity, 0.45, kTolerance);
-    CHECK(minimalV2.value.movementMode == aoc::core::MovementMode::EdgeOnly);
-    CHECK(minimalV2.value.showSeconds == false && minimalV2.value.showDate == false);
+    const auto minimalV6 = aoc::core::deserializeSettings("version=6\n");
+    CHECK(!minimalV6.recovered);
+    CHECK(!minimalV6.migrated);
+    CHECK_NEAR(minimalV6.value.opacity, 0.80, kTolerance);
+    CHECK(minimalV6.value.movementMode == aoc::core::MovementMode::EdgeOnly);
+    CHECK(minimalV6.value.showSeconds == false && minimalV6.value.showDate == false);
 
     beginScenario("custom allowed areas clamp at the core boundary and persist exactly when valid");
     auto customArea = defaults;
@@ -175,6 +195,15 @@ void testSettingsDefaultsMigrationAndRecovery() {
     clampedArea.validateAndNormalize();
     CHECK(clampedArea.allowedArea == aoc::core::NormalizedRect{0.0, 0.75, 1.0, 1.0});
 
+    auto minimumDuration = defaults;
+    minimumDuration.movementIntervalSeconds = 0;
+    minimumDuration.validateAndNormalize();
+    CHECK(minimumDuration.movementIntervalSeconds == 1);
+    auto maximumDuration = defaults;
+    maximumDuration.movementIntervalSeconds = 8 * 24 * 60 * 60;
+    maximumDuration.validateAndNormalize();
+    CHECK(maximumDuration.movementIntervalSeconds == 8 * 24 * 60 * 60);
+
     beginScenario("current settings schema round-trips display, placement, and customization fields");
     auto original = defaults;
     original.timeFormat = aoc::core::TimeFormat::TwentyFourHour;
@@ -186,17 +215,18 @@ void testSettingsDefaultsMigrationAndRecovery() {
     original.fontSizeDip = 44.5;
     original.textColor = {1, 2, 3, 4};
     original.opacity = 0.44;
-    original.movementIntervalMinutes = 17;
+    original.movementIntervalSeconds = 17 * 60 + 23;
     original.movementMode = aoc::core::MovementMode::LocalWander;
     original.microShiftEnabled = false;
-    original.microShiftRadiusDip = 3.5;
+    original.microShiftCount = 7;
+    original.microShiftDistancePx = 11;
+    original.localAreaRadiusPx = 135;
+    original.localAreaAnchor = {0.25, 0.75};
+    original.localAreaAnchorSet = true;
     original.allowedArea = {0.1, 0.2, 0.8, 0.9};
-    original.excludedAreas = {{0.0, 0.0, 0.1, 0.1}, {0.7, 0.7, 0.9, 0.95}};
     original.edgeMarginDip = 31.0;
     original.monitorMode = aoc::core::MonitorMode::Fixed;
     original.fixedMonitorKey = "DISPLAY%=\\Device=One;\n";
-    original.preferredPosition = {0.3, 0.7};
-    original.preferredPositionEnabled = true;
     original.hideInFullscreen = false;
     original.launchAtStartup = true;
     original.hotkeyEnabled = false;
@@ -204,6 +234,13 @@ void testSettingsDefaultsMigrationAndRecovery() {
     original.boostOpacity = 0.66;
     original.boostDurationSeconds = 19;
     const auto serialized = aoc::core::serializeSettings(original);
+    CHECK(serialized.find("microShiftEnabled=0") != std::string::npos);
+    CHECK(serialized.find("microShiftCount=7") != std::string::npos);
+    CHECK(serialized.find("microShiftDistancePx=11") != std::string::npos);
+    CHECK(serialized.find("localAreaRadiusPx=135") != std::string::npos);
+    CHECK(serialized.find("localAreaAnchorSet=1") != std::string::npos);
+    CHECK(serialized.find("excludedAreas") == std::string::npos);
+    CHECK(serialized.find("preferredPosition") == std::string::npos);
     const auto roundTrip = aoc::core::deserializeSettings(serialized);
     CHECK(!roundTrip.recovered);
     CHECK(!roundTrip.migrated);
@@ -217,17 +254,18 @@ void testSettingsDefaultsMigrationAndRecovery() {
     CHECK_NEAR(roundTrip.value.fontSizeDip, original.fontSizeDip, kTolerance);
     CHECK(roundTrip.value.textColor == original.textColor);
     CHECK_NEAR(roundTrip.value.opacity, original.opacity, kTolerance);
-    CHECK(roundTrip.value.movementIntervalMinutes == original.movementIntervalMinutes);
+    CHECK(roundTrip.value.movementIntervalSeconds == original.movementIntervalSeconds);
     CHECK(roundTrip.value.movementMode == original.movementMode);
     CHECK(roundTrip.value.microShiftEnabled == original.microShiftEnabled);
-    CHECK_NEAR(roundTrip.value.microShiftRadiusDip, original.microShiftRadiusDip, kTolerance);
+    CHECK(roundTrip.value.microShiftCount == original.microShiftCount);
+    CHECK(roundTrip.value.microShiftDistancePx == original.microShiftDistancePx);
+    CHECK(roundTrip.value.localAreaRadiusPx == original.localAreaRadiusPx);
+    CHECK(roundTrip.value.localAreaAnchor == original.localAreaAnchor);
+    CHECK(roundTrip.value.localAreaAnchorSet);
     CHECK(roundTrip.value.allowedArea == original.allowedArea);
-    CHECK(roundTrip.value.excludedAreas == original.excludedAreas);
     CHECK_NEAR(roundTrip.value.edgeMarginDip, original.edgeMarginDip, kTolerance);
     CHECK(roundTrip.value.monitorMode == original.monitorMode);
     CHECK(roundTrip.value.fixedMonitorKey == original.fixedMonitorKey);
-    CHECK(roundTrip.value.preferredPosition == original.preferredPosition);
-    CHECK(roundTrip.value.preferredPositionEnabled == original.preferredPositionEnabled);
     CHECK(roundTrip.value.hideInFullscreen == original.hideInFullscreen);
     CHECK(roundTrip.value.launchAtStartup == original.launchAtStartup);
     CHECK(roundTrip.value.hotkeyEnabled == original.hotkeyEnabled);
@@ -248,6 +286,14 @@ void testSettingsDefaultsMigrationAndRecovery() {
     const auto legacy = aoc::core::deserializeSettings("fontSize=38\nopacity=0.3\n");
     CHECK(legacy.recovered && legacy.migrated);
     CHECK_NEAR(legacy.value.fontSizeDip, 38.0, kTolerance);
+    const auto previousDefaults = aoc::core::deserializeSettings(
+        "version=2\nmovementIntervalMinutes=5\nedgeMarginDip=24\n"
+        "microShiftEnabled=1\nmicroShiftRadiusDip=8\npreferredPositionEnabled=1\n");
+    CHECK(previousDefaults.recovered && previousDefaults.migrated);
+    CHECK(previousDefaults.value.movementIntervalSeconds == 3600);
+    CHECK(previousDefaults.value.microShiftEnabled);
+    CHECK(previousDefaults.value.microShiftDistancePx == 8);
+    CHECK_NEAR(previousDefaults.value.edgeMarginDip, 0.0, kTolerance);
 
     beginScenario("invalid settings values normalize and malformed files recover to safe defaults");
     auto invalid = defaults;
@@ -259,13 +305,15 @@ void testSettingsDefaultsMigrationAndRecovery() {
     invalid.fontSizeDip = std::numeric_limits<double>::quiet_NaN();
     invalid.opacity = std::numeric_limits<double>::infinity();
     invalid.boostOpacity = -5.0;
-    invalid.microShiftRadiusDip = 99.0;
     invalid.edgeMarginDip = -5.0;
-    invalid.movementIntervalMinutes = 999;
+    invalid.movementIntervalSeconds = 999;
+    invalid.microShiftCount = 999;
+    invalid.microShiftDistancePx = 999;
+    invalid.localAreaRadiusPx = 99999;
+    invalid.localAreaAnchor = {std::numeric_limits<double>::quiet_NaN(), 4.0};
+    invalid.localAreaAnchorSet = true;
     invalid.boostDurationSeconds = 0;
     invalid.allowedArea = {-1.0, 2.0, 3.0, -2.0};
-    invalid.excludedAreas = {{0.0, 0.0, 0.0, 1.0}, {-1.0, -1.0, 0.2, 0.2}};
-    invalid.preferredPosition = {-2.0, 4.0};
     invalid.fontFamily.clear();
     invalid.fixedMonitorKey.assign(600, 'k');
     invalid.validateAndNormalize();
@@ -275,15 +323,17 @@ void testSettingsDefaultsMigrationAndRecovery() {
     CHECK(invalid.movementMode == aoc::core::MovementMode::EdgeOnly);
     CHECK(invalid.monitorMode == aoc::core::MonitorMode::FollowPrimary);
     CHECK_NEAR(invalid.fontSizeDip, 32.0, kTolerance);
-    CHECK_NEAR(invalid.opacity, 0.45, kTolerance);
+    CHECK_NEAR(invalid.opacity, 0.80, kTolerance);
     CHECK_NEAR(invalid.boostOpacity, 0.0, kTolerance);
-    CHECK_NEAR(invalid.microShiftRadiusDip, 64.0, kTolerance);
     CHECK_NEAR(invalid.edgeMarginDip, 0.0, kTolerance);
-    CHECK(invalid.movementIntervalMinutes == 120);
+    CHECK(invalid.movementIntervalSeconds == 999);
+    CHECK(invalid.microShiftCount == 100);
+    CHECK(invalid.microShiftDistancePx == 100);
+    CHECK(invalid.localAreaRadiusPx == 10000);
+    CHECK(invalid.localAreaAnchor == aoc::core::NormalizedPoint{0.5, 0.5});
+    CHECK(!invalid.localAreaAnchorSet);
     CHECK(invalid.boostDurationSeconds == 1);
     CHECK(invalid.allowedArea == aoc::core::NormalizedRect{0.0, 0.0, 1.0, 1.0});
-    CHECK(invalid.excludedAreas.size() == 1);
-    CHECK(invalid.preferredPosition == aoc::core::NormalizedPoint{0.0, 1.0});
     CHECK(invalid.fontFamily == "Segoe UI");
     CHECK(invalid.fixedMonitorKey.size() == 512);
 
@@ -291,9 +341,9 @@ void testSettingsDefaultsMigrationAndRecovery() {
         "version=2\nopacity=nan\nshowSeconds=maybe\nallowedArea=broken\nexcludedAreas=0,0,0.2,0.2;broken\n");
     CHECK(corrupt.recovered);
     CHECK(!corrupt.value.showSeconds);
-    CHECK_NEAR(corrupt.value.opacity, 0.45, kTolerance);
+    CHECK_NEAR(corrupt.value.opacity, 0.80, kTolerance);
     CHECK(corrupt.value.allowedArea == aoc::core::Settings::defaults().allowedArea);
-    CHECK(aoc::core::deserializeSettings("version=3\nopacity=0.1\n").recovered);
+    CHECK(aoc::core::deserializeSettings("version=7\nopacity=0.1\n").recovered);
     CHECK(aoc::core::deserializeSettings("version=not-a-number\n").recovered);
     CHECK(aoc::core::deserializeSettings("this is not a settings file").recovered);
 }
@@ -304,10 +354,9 @@ aoc::core::PlacementContext placementContext() {
     context.policyBoundsPx = context.monitorBoundsPx;
     context.dpi = 96;
     context.clockSizeDip = {120.0, 40.0};
-    context.edgeMarginDip = 24.0;
+    context.edgeMarginDip = 0.0;
     context.allowedArea = {0.0, 0.0, 1.0, 1.0};
     context.mode = aoc::core::MovementMode::EdgeOnly;
-    context.preferredCenter = aoc::core::NormalizedPoint{0.5, 0.5};
     context.randomSeed = 42;
     return context;
 }
@@ -347,7 +396,6 @@ bool intersects(const aoc::core::RectI& first, const aoc::core::RectI& second) {
 void testPlacementModesAndConstraints() {
     beginScenario("edge-only candidates stay on the perimeter with no interior anchors");
     auto edge = placementContext();
-    edge.excludedAreas.clear();
     const auto edgeBounds = movementBoundsForTest(edge);
     const auto edgeCandidates = aoc::core::generateCandidates(edge);
     CHECK(edgeCandidates.size() > 20);
@@ -357,7 +405,13 @@ void testPlacementModesAndConstraints() {
         CHECK(touchesBoundary(candidate, edgeBounds));
     }
 
-    beginScenario("whole-screen and local-wander modes expose their intended candidate regions");
+    beginScenario("four-corners, whole-screen, and local-area modes expose their intended candidate regions");
+    auto corners = edge;
+    corners.mode = aoc::core::MovementMode::FourCorners;
+    const auto cornerCandidates = aoc::core::generateCandidates(corners);
+    CHECK(cornerCandidates.size() == 4);
+    for (const auto& candidate : cornerCandidates) CHECK(touchesBoundary(candidate, edgeBounds));
+
     auto whole = edge;
     whole.mode = aoc::core::MovementMode::WholeScreen;
     const auto wholeCandidates = aoc::core::generateCandidates(whole);
@@ -372,25 +426,77 @@ void testPlacementModesAndConstraints() {
 
     auto local = edge;
     local.mode = aoc::core::MovementMode::LocalWander;
-    local.preferredCenter = aoc::core::NormalizedPoint{0.65, 0.35};
+    local.localAnchorPx = aoc::core::PointD{650.0, 500.0};
+    local.localRadiusPx = 100;
     const auto localCandidates = aoc::core::generateCandidates(local);
-    const auto preferredPhysical = aoc::core::normalizedPointToPhysical(*local.preferredCenter,
-                                                                          local.monitorBoundsPx);
-    const auto preferredRect = centeredRectForTest(preferredPhysical, clockSizePixelsForTest(local));
+    const auto preferredRect = centeredRectForTest(*local.localAnchorPx, clockSizePixelsForTest(local));
     CHECK(localCandidates.size() > 1);
     CHECK(std::find(localCandidates.begin(), localCandidates.end(), preferredRect) != localCandidates.end());
     for (const auto& candidate : localCandidates) {
         CHECK(aoc::core::isValidPlacement(candidate, local));
+        CHECK(std::abs(candidate.center().x - local.localAnchorPx->x) <= local.localRadiusPx + 1.0);
+        CHECK(std::abs(candidate.center().y - local.localAnchorPx->y) <= local.localRadiusPx + 1.0);
     }
 
-    beginScenario("DPI-scaled margins, allowed bounds, excluded bounds, and padded surfaces are enforced");
+    beginScenario("accelerated 240-move simulation keeps every mode inside its intended geometry");
+    auto simulate = [](aoc::core::PlacementContext context, int moves) {
+        std::vector<aoc::core::RectI> visited;
+        aoc::core::ExposureMap exposure;
+        for (int step = 0; step < moves; ++step) {
+            context.randomSeed = 1000 + static_cast<std::uint64_t>(step);
+            const auto choice = aoc::core::choosePlacement(context, exposure);
+            if (!choice.has_value()) break;
+            visited.push_back(choice->boundsPx);
+            exposure.charge(aoc::core::physicalToNormalized(choice->boundsPx, context.monitorBoundsPx), 1.0);
+            context.previousRectPx = choice->boundsPx;
+            context.recentMacroRects.insert(context.recentMacroRects.begin(), choice->boundsPx);
+            if (context.recentMacroRects.size() > 12) context.recentMacroRects.resize(12);
+        }
+        return visited;
+    };
+
+    const auto simulatedEdge = simulate(edge, 240);
+    CHECK(simulatedEdge.size() == 240);
+    for (const auto& rect : simulatedEdge) CHECK(touchesBoundary(rect, edgeBounds));
+
+    const auto simulatedCorners = simulate(corners, 80);
+    CHECK(simulatedCorners.size() == 80);
+    for (const auto& rect : simulatedCorners) {
+        CHECK(std::find(cornerCandidates.begin(), cornerCandidates.end(), rect) != cornerCandidates.end());
+    }
+
+    const auto simulatedWhole = simulate(whole, 240);
+    CHECK(simulatedWhole.size() == 240);
+    int wholeInteriorMoves = 0;
+    std::vector<aoc::core::RectI> uniqueWhole;
+    for (const auto& rect : simulatedWhole) {
+        if (!touchesBoundary(rect, edgeBounds)) ++wholeInteriorMoves;
+        if (std::find(uniqueWhole.begin(), uniqueWhole.end(), rect) == uniqueWhole.end()) uniqueWhole.push_back(rect);
+    }
+    CHECK(wholeInteriorMoves > 120);
+    CHECK(uniqueWhole.size() > 40);
+
+    const auto simulatedLocal = simulate(local, 240);
+    CHECK(simulatedLocal.size() == 240);
+    for (const auto& rect : simulatedLocal) {
+        CHECK(std::abs(rect.center().x - local.localAnchorPx->x) <= local.localRadiusPx + 1.0);
+        CHECK(std::abs(rect.center().y - local.localAnchorPx->y) <= local.localRadiusPx + 1.0);
+    }
+
+    auto localAtBorder = local;
+    localAtBorder.localAnchorPx = aoc::core::PointD{edgeBounds.right - 10.0, edgeBounds.bottom - 10.0};
+    for (const auto& rect : aoc::core::generateCandidates(localAtBorder)) {
+        CHECK(aoc::core::isValidPlacement(rect, localAtBorder));
+        CHECK(rect.right <= edgeBounds.right && rect.bottom <= edgeBounds.bottom);
+    }
+
+    beginScenario("DPI-scaled margins, allowed bounds, and padded surfaces are enforced");
     auto dpi = placementContext();
     dpi.monitorBoundsPx = {0, 0, 2560, 1440};
     dpi.policyBoundsPx = dpi.monitorBoundsPx;
     dpi.dpi = 150;
     dpi.clockSizeDip = {100.0, 40.0};
     dpi.edgeMarginDip = 24.0;
-    dpi.excludedAreas.clear();
     const auto dpiCandidates = aoc::core::generateCandidates(dpi);
     const int expectedMargin = static_cast<int>(std::lround(aoc::core::dipToPixels(24.0, 150)));
     CHECK(expectedMargin == 38);
@@ -405,11 +511,8 @@ void testPlacementModesAndConstraints() {
     auto constrained = placementContext();
     constrained.mode = aoc::core::MovementMode::WholeScreen;
     constrained.allowedArea = {0.20, 0.10, 0.90, 0.90};
-    constrained.excludedAreas = {{0.45, 0.40, 0.55, 0.60}};
     constrained.surfacePaddingDip = 4.0;
     const auto constrainedCandidates = aoc::core::generateCandidates(constrained);
-    const auto excludedPixels = aoc::core::normalizedToPhysicalPixels(constrained.excludedAreas.front(),
-                                                                        constrained.monitorBoundsPx);
     CHECK(!constrainedCandidates.empty());
     for (const auto& candidate : constrainedCandidates) {
         const auto surface = aoc::core::paddedPlacementRect(candidate,
@@ -417,18 +520,23 @@ void testPlacementModesAndConstraints() {
                                                               constrained.dpi);
         CHECK(aoc::core::isValidPlacement(candidate, constrained));
         CHECK(movementBoundsForTest(constrained).contains(surface));
-        CHECK(!intersects(surface, excludedPixels));
     }
-    const auto blocked = centeredRectForTest(
-        aoc::core::normalizedPointToPhysical({0.5, 0.5}, constrained.monitorBoundsPx),
-        clockSizePixelsForTest(constrained));
-    CHECK(!aoc::core::isValidPlacement(blocked, constrained));
+
+    beginScenario("routine text resizing stays near the current anchor instead of selecting a new position");
+    auto resize = placementContext();
+    const aoc::core::RectI current{resize.policyBoundsPx.right - 120, 300,
+                                  resize.policyBoundsPx.right, 340};
+    const aoc::core::RectI wider{current.left, current.top, current.left + 150, current.bottom};
+    const auto fitted = aoc::core::fitPlacementNear(wider, resize);
+    CHECK(fitted.isValid());
+    CHECK(fitted.right == resize.policyBoundsPx.right);
+    CHECK(fitted.top == current.top);
+    CHECK(fitted.width() == 150);
 }
 
-void testPlacementHistoryAndBoundedMicroShift() {
+void testPlacementHistory() {
     beginScenario("placement history avoids exact repeats and overlapping recent macro anchors");
     auto context = placementContext();
-    context.excludedAreas.clear();
     const auto candidates = aoc::core::generateCandidates(context);
     CHECK(candidates.size() > 3);
     context.previousRectPx = candidates.front();
@@ -442,28 +550,6 @@ void testPlacementHistoryAndBoundedMicroShift() {
         CHECK(!intersects(choice->boundsPx, candidates.front()));
         CHECK(!intersects(choice->boundsPx, candidates[1]));
     }
-
-    beginScenario("bounded micro-shifts are deterministic, fixed-size, and measured from the macro anchor");
-    const aoc::core::RectI current{500, 400, 700, 460};
-    const aoc::core::RectI anchor{1000, 800, 1200, 860};
-    const int radiusPixels = static_cast<int>(std::lround(aoc::core::dipToPixels(8.0, 150)));
-    const auto repeatA = aoc::core::applyBoundedMicroShift(current, anchor, 8.0, 150, 17);
-    const auto repeatB = aoc::core::applyBoundedMicroShift(current, anchor, 8.0, 150, 17);
-    CHECK(repeatA == repeatB);
-    CHECK(repeatA.width() == current.width() && repeatA.height() == current.height());
-    for (std::uint64_t seed = 0; seed < 128; ++seed) {
-        const auto shifted = aoc::core::applyBoundedMicroShift(current, anchor, 8.0, 150, seed);
-        CHECK(shifted.width() == current.width() && shifted.height() == current.height());
-        CHECK(std::abs(shifted.left - anchor.left) <= radiusPixels);
-        CHECK(std::abs(shifted.top - anchor.top) <= radiusPixels);
-        CHECK(shifted.right - anchor.right == shifted.left - anchor.left);
-        CHECK(shifted.bottom - anchor.bottom == shifted.top - anchor.top);
-    }
-    CHECK(aoc::core::applyBoundedMicroShift(current, anchor, 0.0, 150, 99) == anchor);
-    const auto fromCurrent = aoc::core::applyBoundedMicroShift(current, {}, 8.0, 150, 17);
-    CHECK(std::abs(fromCurrent.left - current.left) <= radiusPixels);
-    CHECK(std::abs(fromCurrent.top - current.top) <= radiusPixels);
-    CHECK(aoc::core::applyBoundedMicroShift({}, anchor, 8.0, 150, 17) == aoc::core::RectI{});
 }
 
 void testExposureMathTrackerAndPersistence() {
@@ -628,17 +714,20 @@ void testSettingsChangeClassification() {
     auto integrations = defaults;
     integrations.launchAtStartup = !integrations.launchAtStartup;
     integrations.hotkeyEnabled = !integrations.hotkeyEnabled;
-    integrations.movementIntervalMinutes += 1;
+    integrations.movementIntervalSeconds += 1;
     const auto integrationChange = aoc::core::classifySettingsChange(defaults, integrations);
     CHECK(integrationChange.startupChanged);
     CHECK(integrationChange.hotkeyChanged);
     CHECK(integrationChange.movementIntervalChanged);
 
-    auto deferredMovement = defaults;
-    deferredMovement.microShiftRadiusDip += 1.0;
-    const auto deferredChange = aoc::core::classifySettingsChange(defaults, deferredMovement);
-    CHECK(deferredChange.anyChanged);
-    CHECK(!deferredChange.placementPolicyChanged);
+    auto micro = defaults;
+    micro.microShiftDistancePx += 1;
+    micro.microShiftCount += 1;
+    const auto microChange = aoc::core::classifySettingsChange(defaults, micro);
+    CHECK(microChange.anyChanged);
+    CHECK(microChange.microShiftChanged);
+    CHECK(!microChange.placementPolicyChanged);
+
 }
 
 } // namespace
@@ -648,7 +737,7 @@ int main() {
     testGeometryAndDpi();
     testSettingsDefaultsMigrationAndRecovery();
     testPlacementModesAndConstraints();
-    testPlacementHistoryAndBoundedMicroShift();
+    testPlacementHistory();
     testExposureMathTrackerAndPersistence();
     testMonitorFallbackAndFullscreenHeuristics();
     testSettingsChangeClassification();

@@ -18,6 +18,7 @@
 #include <shellapi.h>
 
 #include <chrono>
+#include <atomic>
 #include <optional>
 #include <random>
 #include <vector>
@@ -49,14 +50,15 @@ private:
     void refreshOpenStatisticsWindow();
     void resetExposureHistory();
     void exportExposureCsv();
-    void refreshMonitorsAndPlacement(bool preservePosition, bool honorPreferredPosition = true);
+    void refreshMonitorsAndPlacement(bool preservePosition);
     void refreshFullscreenState();
     void refreshDisplayState(bool displayOn);
     void refreshTimeAndRender();
     void renderAndPresent();
     void scheduleTimeBoundary();
-    void scheduleMicroBoundary();
     void scheduleMajorMove();
+    void scheduleMicroShift();
+    void restartMovementSchedule();
     void applyMajorMove();
     void applyMicroShift();
     void setClockVisible(bool visible, const wchar_t* reason);
@@ -66,15 +68,14 @@ private:
     void beginPositioningMode();
     void handleDraggedPoint(POINT screenPoint);
     void handleDragFinished();
+    void rememberLocalAnchor();
     void rememberMacroPosition(const core::RectI& rect);
     bool persistSettings();
     void persistExposure();
-    void applySettings(const core::Settings& settings, bool committed);
-    void setStartupRegistration();
+    void applySettings(const core::Settings& settings);
+    [[nodiscard]] bool setStartupRegistration();
+    [[nodiscard]] bool armTimer(UINT_PTR id, UINT intervalMilliseconds, const wchar_t* purpose);
     void updateExposureState();
-    void logState(const std::wstring& message);
-    [[nodiscard]] core::MonitorInfo* selectedMonitor();
-    [[nodiscard]] const core::MonitorInfo* selectedMonitor() const;
     [[nodiscard]] RECT currentScreenRect() const;
     [[nodiscard]] double currentOpacity() const noexcept;
     [[nodiscard]] std::wstring currentTimeText() const;
@@ -99,8 +100,12 @@ private:
     bool brightnessBoosted_{false};
     bool comInitialized_{false};
     bool anotherInstance_{false};
-    std::chrono::steady_clock::time_point nextMajorMove_{};
+    std::atomic_bool fullscreenRefreshPending_{false};
     std::uint64_t placementSeed_{0xA0C0C0DEULL};
+    std::uint64_t microShiftStep_{0};
+    int nextMicroShiftIndex_{0};
+    std::chrono::steady_clock::time_point movementCycleStartedAt_{};
+    std::chrono::steady_clock::time_point majorMoveDeadline_{};
     std::vector<core::RectI> macroHistory_;
     core::RectI macroAnchorRect_{};
     UniqueKernelHandle singletonMutex_;
@@ -109,9 +114,6 @@ private:
     DataPaths paths_;
     Logger logger_;
     core::Settings settings_;
-    // settings_ may contain an uncommitted live preview. Keep the durable
-    // baseline separate so a later commit still detects the net change.
-    core::Settings committedSettings_;
     core::ExposureStore exposure_;
     core::ExposureTracker exposureTracker_;
     MonitorService monitorService_;
@@ -121,6 +123,7 @@ private:
     core::SizeD renderedSizeDip_{80.0, 32.0};
     core::SizeD renderedSurfaceDip_{80.0, 32.0};
     core::LocaleHourMode localeHourMode_{core::LocaleHourMode::TwentyFourHour};
+    std::wstring lastRenderedTimeText_;
     LayeredRenderer renderer_;
     OverlayWindow overlay_;
     SettingsWindow settingsWindow_;

@@ -3,11 +3,10 @@
 #include "aoc/core/types.h"
 
 #include <string>
-#include <vector>
 
 namespace aoc::core {
 
-constexpr int kCurrentSettingsVersion = 2;
+constexpr int kCurrentSettingsVersion = 6;
 
 struct Settings {
     int version{kCurrentSettingsVersion};
@@ -18,28 +17,29 @@ struct Settings {
     std::string fontFamily{"Segoe UI"};
     FontWeight fontWeight{FontWeight::Normal};
     double fontSizeDip{32.0};
-    Color textColor{176, 176, 176, 255};
-    double opacity{0.45};
-    int movementIntervalMinutes{5};
+    Color textColor{255, 255, 255, 255};
+    double opacity{0.80};
+    int movementIntervalSeconds{3600};
     MovementMode movementMode{MovementMode::EdgeOnly};
     bool microShiftEnabled{true};
-    double microShiftRadiusDip{8.0};
+    int microShiftCount{3};
+    int microShiftDistancePx{3};
+    int localAreaRadiusPx{100};
+    NormalizedPoint localAreaAnchor{};
+    bool localAreaAnchorSet{false};
     NormalizedRect allowedArea{};
-    std::vector<NormalizedRect> excludedAreas;
-    double edgeMarginDip{24.0};
+    double edgeMarginDip{0.0};
     MonitorMode monitorMode{MonitorMode::FollowPrimary};
     std::string fixedMonitorKey;
-    NormalizedPoint preferredPosition{0.5, 0.5};
-    bool preferredPositionEnabled{false};
     bool hideInFullscreen{true};
     bool launchAtStartup{false};
     bool hotkeyEnabled{true};
     bool clockVisible{true};
-    double boostOpacity{0.85};
+    double boostOpacity{1.0};
     int boostDurationSeconds{15};
 
     [[nodiscard]] static Settings defaults();
-    [[nodiscard]] static Settings oledSafePreset();
+    [[nodiscard]] static Settings oledPreset();
     void validateAndNormalize() noexcept;
 };
 

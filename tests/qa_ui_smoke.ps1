@@ -48,6 +48,18 @@ public static class AocUiNative
         public int NTrackPos;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ComboBoxInfo
+    {
+        public int CbSize;
+        public Rect RcItem;
+        public Rect RcButton;
+        public int ButtonState;
+        public IntPtr ComboHandle;
+        public IntPtr EditHandle;
+        public IntPtr ListHandle;
+    }
+
     public sealed class WindowInfo
     {
         public IntPtr Handle { get; set; }
@@ -73,6 +85,9 @@ public static class AocUiNative
     private static extern bool IsWindowVisible(IntPtr hwnd);
 
     [DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [DllImport("user32.dll", EntryPoint = "SendMessageW")]
@@ -95,6 +110,12 @@ public static class AocUiNative
 
     [DllImport("user32.dll")]
     private static extern bool GetScrollInfo(IntPtr hwnd, int bar, ref ScrollInfo info);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetComboBoxInfo(IntPtr hwnd, ref ComboBoxInfo info);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
+    private static extern IntPtr GetClassLongPtr(IntPtr hwnd, int index);
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -155,6 +176,11 @@ public static class AocUiNative
         return WindowText(hwnd);
     }
 
+    public static bool Enabled(IntPtr hwnd)
+    {
+        return IsWindowEnabled(hwnd);
+    }
+
     public static Rect ReadRect(IntPtr hwnd)
     {
         Rect rect;
@@ -187,6 +213,20 @@ public static class AocUiNative
             FMask = 0x17,
         };
         return GetScrollInfo(hwnd, 1, ref info) ? info.NPos : -1;
+    }
+
+    public static Rect ReadComboListRect(IntPtr hwnd)
+    {
+        var info = new ComboBoxInfo { CbSize = Marshal.SizeOf(typeof(ComboBoxInfo)) };
+        Rect rect;
+        if (!GetComboBoxInfo(hwnd, ref info) || info.ListHandle == IntPtr.Zero ||
+            !GetWindowRect(info.ListHandle, out rect)) return new Rect();
+        return rect;
+    }
+
+    public static bool HasClassIcon(IntPtr hwnd, bool small)
+    {
+        return GetClassLongPtr(hwnd, small ? -34 : -14) != IntPtr.Zero; // GCLP_HICONSM / GCLP_HICON
     }
 
     public static void SetText(IntPtr hwnd, string text)
@@ -256,9 +296,8 @@ function Assert-SettingsPage {
     )
     $signatures = @(
         @{ Expected = @(1000, 1002, 1004); Hidden = @(1011, 1030); Front = 1000; Text = 'Time format' },
-        @{ Expected = @(1011, 1012, 1013); Hidden = @(1000, 1030); Front = 1011; Text = 'Movement mode' },
-        @{ Expected = @(1030, 1031, 1032, 1033); Hidden = @(1000, 1011); Front = 1030; Text = 'Monitor' },
-        @{ Expected = @(); Hidden = @(1000, 1011, 1030); Front = 0; Text = 'Exposure is charged only while' }
+        @{ Expected = @(1011, 1012, 1013, 1014, 1016, 1021, 1022, 1023, 1024); Hidden = @(1000, 1030); Front = 1011; Text = 'Movement mode' },
+        @{ Expected = @(1030, 1031, 1032, 1033); Hidden = @(1000, 1011); Front = 1030; Text = 'Monitor' }
     )
     $signature = $signatures[$Page]
     $children = @(Get-ChildWindows $Window)
@@ -272,8 +311,8 @@ function Assert-SettingsPage {
     if ($footerFront -ne $footerButton.Handle) {
         throw "Page $Page footer is occluded in child Z-order (front=$footerFront expected=$($footerButton.Handle))"
     }
-    if (@($children | Where-Object { $_.Visible -and $_.Text -eq 'Changes are saved automatically.' }).Count -ne 1) {
-        throw "Page $Page is missing the automatic-save disclosure"
+    if (@($children | Where-Object { $_.Visible -and $_.Text.StartsWith('Edit a value, then select Apply.') }).Count -ne 1) {
+        throw "Page $Page is missing the Apply disclosure"
     }
     foreach ($id in $signature.Expected) {
         $matches = @($children | Where-Object { $_.Id -eq $id -and $_.Visible })
@@ -322,7 +361,7 @@ function Save-WindowCapture {
     try {
         $dc = $graphics.GetHdc()
         try {
-            if (-not [AocUiNative]::PrintWindow($Window, $dc, 2)) { throw 'PrintWindow failed' }
+            if (-not [AocUiNative]::PrintWindow($Window, $dc, 0)) { throw 'PrintWindow failed' }
         }
         finally { $graphics.ReleaseHdc($dc) }
         $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
@@ -350,12 +389,36 @@ function Get-SettingsWindow {
     throw "Timed out waiting for the isolated Settings window"
 }
 
+function Get-MovementHistoryWindow {
+    param([System.Diagnostics.Process]$Process)
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        $match = @([AocUiNative]::WindowsForProcess([uint32]$Process.Id)) | Where-Object {
+            $_.Visible -and $_.ClassName -eq 'AdaptiveOledClockStatisticsWindow' -and
+            $_.Text -eq 'Adaptive OLED Clock - Movement History'
+        } | Select-Object -First 1
+        if ($null -ne $match) { return $match }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'Timed out waiting for the Movement History window'
+}
+
 function Test-ComboDropdown {
     param([object]$Combo)
     $before = [int64]([AocUiNative]::SendMessage($Combo.Handle, 0x0157, [IntPtr]::Zero, [IntPtr]::Zero))
     [AocUiNative]::SendMessage($Combo.Handle, 0x014F, [IntPtr]::new(1), [IntPtr]::Zero) | Out-Null
     Start-Sleep -Milliseconds 80
     $open = [int64]([AocUiNative]::SendMessage($Combo.Handle, 0x0157, [IntPtr]::Zero, [IntPtr]::Zero))
+    $comboRect = [AocUiNative]::ReadRect($Combo.Handle)
+    $listRect = [AocUiNative]::ReadComboListRect($Combo.Handle)
+    $comboHeight = $comboRect.Bottom - $comboRect.Top
+    $listHeight = $listRect.Bottom - $listRect.Top
+    $itemCount = [int64]([AocUiNative]::SendMessage($Combo.Handle, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero))
+    $itemHeight = [int64]([AocUiNative]::SendMessage($Combo.Handle, 0x0154, [IntPtr]::Zero, [IntPtr]::Zero))
+    if ($open -eq 0) { throw "Dropdown $($Combo.Id) did not open" }
+    $minimumUsableHeight = 4 + 16 * [Math]::Min(3, $itemCount)
+    if ($itemCount -le 0 -or $listHeight -lt $minimumUsableHeight) {
+        throw "Dropdown $($Combo.Id) opened without a usable list ($listHeight px for a $comboHeight px field, $itemCount items at $itemHeight px)"
+    }
     [AocUiNative]::SendMessage($Combo.Handle, 0x014F, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     Start-Sleep -Milliseconds 80
     $closed = [int64]([AocUiNative]::SendMessage($Combo.Handle, 0x0157, [IntPtr]::Zero, [IntPtr]::Zero))
@@ -365,6 +428,10 @@ function Test-ComboDropdown {
         Before = ($before -ne 0)
         OpenAfterShow = ($open -ne 0)
         ClosedAfterHide = ($closed -eq 0)
+        FieldHeight = $comboHeight
+        OpenListHeight = $listHeight
+        ItemCount = $itemCount
+        ItemHeight = $itemHeight
     }
 }
 
@@ -418,13 +485,18 @@ $evidence = [ordered]@{
     Executable = $exe
     RuntimeRoot = $runtime
     WindowFound = $false
+    WindowIcons = @{}
     VisibleCombos = @()
     Dropdowns = @()
     PageChecks = @()
     VisualCaptures = @()
     Scroll = $null
     Movement = @{}
+    MovementInterval = @{}
+    Presets = @{}
+    SecondsStability = @{}
     CustomAllowedArea = @{}
+    MovementHistory = @{}
     Reopened = @{}
     Overlay = @{}
 }
@@ -461,11 +533,18 @@ try {
     $settings = Get-SettingsWindow $process
     $settingsHwnd = $settings.Handle
     $evidence.WindowFound = $true
+    $evidence.WindowIcons = [ordered]@{
+        Large = [AocUiNative]::HasClassIcon($settingsHwnd, $false)
+        Small = [AocUiNative]::HasClassIcon($settingsHwnd, $true)
+    }
+    if (-not $evidence.WindowIcons.Large -or -not $evidence.WindowIcons.Small) {
+        throw 'Settings window is missing its embedded application icon'
+    }
     [AocUiNative]::ShowWindow($settingsHwnd, 5) | Out-Null
     [AocUiNative]::SetForegroundWindow($settingsHwnd) | Out-Null
 
     $tab = Get-Control $settingsHwnd 900
-    for ($pageIndex = 0; $pageIndex -lt 4; $pageIndex++) {
+    for ($pageIndex = 0; $pageIndex -lt 3; $pageIndex++) {
         [AocUiNative]::SelectTabByKey($tab.Handle, $pageIndex)
         Start-Sleep -Milliseconds 120
         $evidence.PageChecks += Assert-SettingsPage $settingsHwnd $pageIndex
@@ -473,10 +552,55 @@ try {
         $evidence.VisualCaptures += Save-WindowCapture $settingsHwnd $capturePath
     }
     [AocUiNative]::SelectTabByKey($tab.Handle, 0)
+    Start-Sleep -Milliseconds 100
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1035 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    $oledOpacity = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1008 -Visible).Handle)
+    $oledBoost = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1009 -Visible).Handle)
+    $oledColor = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1007 -Visible).Handle)
+    [AocUiNative]::SelectTabByKey($tab.Handle, 1)
+    Start-Sleep -Milliseconds 100
+    $oledMovement = [ordered]@{
+        Hours = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1012 -Visible).Handle)
+        Minutes = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1021 -Visible).Handle)
+        Count = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1023 -Visible).Handle)
+        Distance = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1014 -Visible).Handle)
+    }
+    if ($oledOpacity -ne '50' -or $oledBoost -ne '100' -or $oledColor -notlike '*176, 176, 176*' -or
+        $oledMovement.Hours -ne '0' -or $oledMovement.Minutes -ne '30' -or
+        $oledMovement.Count -ne '4' -or $oledMovement.Distance -ne '5') {
+        throw 'OLED preset values do not match the requested profile'
+    }
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1034 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    $defaultMovement = [ordered]@{
+        Hours = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1012 -Visible).Handle)
+        Count = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1023 -Visible).Handle)
+        Distance = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1014 -Visible).Handle)
+    }
+    [AocUiNative]::SelectTabByKey($tab.Handle, 0)
+    Start-Sleep -Milliseconds 100
+    $defaultOpacity = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1008 -Visible).Handle)
+    $defaultBoost = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1009 -Visible).Handle)
+    $defaultColor = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1007 -Visible).Handle)
+    if ($defaultOpacity -ne '80' -or $defaultBoost -ne '100' -or $defaultColor -notlike '*255, 255, 255*' -or
+        $defaultMovement.Hours -ne '1' -or $defaultMovement.Count -ne '3' -or $defaultMovement.Distance -ne '3') {
+        throw 'Default values do not match the requested profile'
+    }
+    $evidence.Presets = [ordered]@{ OledOpacity=$oledOpacity; OledBoost=$oledBoost; OledColor=$oledColor; OledMovement=$oledMovement; DefaultOpacity=$defaultOpacity; DefaultBoost=$defaultBoost; DefaultColor=$defaultColor; DefaultMovement=$defaultMovement }
+    [AocUiNative]::SelectTabByKey($tab.Handle, 2)
+    Start-Sleep -Milliseconds 120
+    $fullscreenCheckbox = Get-Control $settingsHwnd 1031 -Visible
+    if ([int64]([AocUiNative]::SendMessage($fullscreenCheckbox.Handle, 0x00F0, [IntPtr]::Zero, [IntPtr]::Zero)) -eq 1) {
+        [AocUiNative]::SendMessage($fullscreenCheckbox.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+        [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    }
+    [AocUiNative]::SelectTabByKey($tab.Handle, 0)
     Start-Sleep -Milliseconds 120
     $page0Combos = @(Get-ChildWindows $settingsHwnd | Where-Object { $_.Visible -and $_.ClassName -eq 'ComboBox' })
     $evidence.VisibleCombos += @($page0Combos | ForEach-Object { [ordered]@{ Page = 0; Id = $_.Id; Text = $_.Text } })
     $evidence.Dropdowns += @($page0Combos | ForEach-Object { Test-ComboDropdown $_ })
+    $fontCount = [int64]([AocUiNative]::SendMessage((Get-Control $settingsHwnd 1004 -Visible).Handle, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero)) # CB_GETCOUNT
+    if ($fontCount -lt 10) { throw "Installed-font list is unexpectedly small ($fontCount entries)" }
+    $evidence.InstalledFontCount = $fontCount
 
     $scrollTop = [AocUiNative]::ReadScrollPosition($settingsHwnd)
     [AocUiNative]::SendMessage($settingsHwnd, 0x0115, [IntPtr]::new(7), [IntPtr]::Zero) | Out-Null # WM_VSCROLL/SB_BOTTOM
@@ -515,24 +639,103 @@ try {
     [AocUiNative]::SelectTabByKey($tab.Handle, 1)
     Start-Sleep -Milliseconds 120
 
-    # Revision 198's contiguous enum assigns MovementMode=1011, AllowedPreset=1016,
-    # and the four custom edit fields=1017..1020.
+    # MovementMode=1011, AllowedPreset=1016, the four custom edit fields=1017..1020,
+    # MicroShiftCount=1023 and Apply=1038.
     $movementCombo = Get-Control $settingsHwnd 1011 -Visible
-    Set-ComboSelection $settingsHwnd 1011 1 # Whole screen
+    $durationValues = [ordered]@{ 1012 = '0'; 1021 = '2'; 1022 = '30' }
+    foreach ($entry in $durationValues.GetEnumerator()) {
+        $edit = Get-Control $settingsHwnd ([int]$entry.Key) -Visible
+        [AocUiNative]::SetText($edit.Handle, [string]$entry.Value)
+        [AocUiNative]::SendCommand($settingsHwnd, [int]$entry.Key, 0x0200, $edit.Handle) # EN_KILLFOCUS
+    }
+    $shiftCount = Get-Control $settingsHwnd 1023 -Visible
+    [AocUiNative]::SetText($shiftCount.Handle, '5')
+    [AocUiNative]::SendCommand($settingsHwnd, 1023, 0x0300, $shiftCount.Handle) # EN_CHANGE
+    if (@(Get-ChildWindows $settingsHwnd | Where-Object { $_.Visible -and $_.Text.StartsWith('Unsaved changes') }).Count -ne 1) {
+        throw 'Typing in a number field did not expose the unsaved-change instruction'
+    }
+    $evidence.VisualCaptures += Save-WindowCapture $settingsHwnd (Join-Path $runtime 'settings-pending-edit.png')
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    Start-Sleep -Milliseconds 180
+    $persistedDuration = Read-SettingLine $settingsPath 'movementIntervalSeconds'
+    if ($persistedDuration -ne '150') {
+        throw "Hours/minutes/seconds duration did not persist as 150 seconds (found '$persistedDuration')"
+    }
+    $persistedShiftCount = Read-SettingLine $settingsPath 'microShiftCount'
+    if ($persistedShiftCount -ne '5') {
+        throw "Small-shift count did not persist as 5 (found '$persistedShiftCount')"
+    }
+    $evidence.MovementInterval = [ordered]@{
+        Hours = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1012 -Visible).Handle)
+        Minutes = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1021 -Visible).Handle)
+        Seconds = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1022 -Visible).Handle)
+        PersistedSeconds = $persistedDuration
+        MicroShiftEnabled = ([int64]([AocUiNative]::SendMessage((Get-Control $settingsHwnd 1013 -Visible).Handle, 0x00F0, [IntPtr]::Zero, [IntPtr]::Zero)) -eq 1)
+        MicroShiftCount = $persistedShiftCount
+    }
+    $initialMode = Read-SettingLine $settingsPath 'movementMode'
+    Set-ComboSelection $settingsHwnd 1011 2 # Whole screen
+    $unappliedMode = Read-SettingLine $settingsPath 'movementMode'
+    if ($unappliedMode -ne $initialMode) {
+        throw "Movement mode persisted before Apply (before='$initialMode', after='$unappliedMode')"
+    }
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    Start-Sleep -Milliseconds 180
     $wholeMode = Read-SettingLine $settingsPath 'movementMode'
+    if ($wholeMode -ne '0') { throw "Whole-screen mode did not persist after Apply (found '$wholeMode')" }
     $wholeOverlay = Read-OverlayRects $process
+    Set-ComboSelection $settingsHwnd 1011 1 # Four corners
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    Start-Sleep -Milliseconds 180
+    $cornersMode = Read-SettingLine $settingsPath 'movementMode'
+    if ($cornersMode -ne '3') { throw "Four-corners mode did not persist after Apply (found '$cornersMode')" }
+    Set-ComboSelection $settingsHwnd 1011 3 # Local area
+    $localRadiusControl = Get-Control $settingsHwnd 1024 -Visible
+    if (-not [AocUiNative]::Enabled($localRadiusControl.Handle)) {
+        throw 'Local movement radius stayed disabled after selecting Local area'
+    }
+    [AocUiNative]::SetText($localRadiusControl.Handle, '120')
+    [AocUiNative]::SendCommand($settingsHwnd, 1024, 0x0300, $localRadiusControl.Handle)
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 180
+    $localMode = Read-SettingLine $settingsPath 'movementMode'
+    $localRadius = Read-SettingLine $settingsPath 'localAreaRadiusPx'
+    if ($localMode -ne '1' -or $localRadius -ne '120') {
+        throw "Local-area settings did not persist (mode='$localMode', radius='$localRadius')"
+    }
     Set-ComboSelection $settingsHwnd 1011 0 # Edge-only
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    Start-Sleep -Milliseconds 180
     $edgeMode = Read-SettingLine $settingsPath 'movementMode'
+    if ($edgeMode -ne '2') { throw "Edge-only mode did not persist after Apply (found '$edgeMode')" }
     $edgeOverlay = Read-OverlayRects $process
     $evidence.Movement = [ordered]@{
         MovementControlIndexAfterEdge = [int64]([AocUiNative]::SendMessage($movementCombo.Handle, 0x0147, [IntPtr]::Zero, [IntPtr]::Zero))
+        InitialPersistedMovementMode = $initialMode
+        UnappliedMovementMode = $unappliedMode
         WholePersistedMovementMode = $wholeMode
+        FourCornersPersistedMovementMode = $cornersMode
+        LocalPersistedMovementMode = $localMode
+        LocalRadiusPx = $localRadius
         EdgePersistedMovementMode = $edgeMode
         WholeOverlayRects = $wholeOverlay
         EdgeOverlayRects = $edgeOverlay
     }
 
     Set-ComboSelection $settingsHwnd 1016 3 # Custom allowed area
+    foreach ($customId in 1017..1020) {
+        $customControl = Get-Control $settingsHwnd $customId -Visible
+        if (-not [AocUiNative]::Enabled($customControl.Handle)) {
+            throw "Custom allowed-area control $customId stayed disabled after selecting Custom"
+        }
+    }
+    $customHeading = @(Get-ChildWindows $settingsHwnd | Where-Object { $_.Visible -and $_.Text -eq 'Custom area (%)' })[0]
+    $headingRect = [AocUiNative]::ReadRect($customHeading.Handle)
+    $firstCustomRect = [AocUiNative]::ReadRect((Get-Control $settingsHwnd 1017 -Visible).Handle)
+    if ($firstCustomRect.Top -le $headingRect.Top -or [math]::Abs($firstCustomRect.Left - $headingRect.Left) -gt 8) {
+        throw "Custom percentage fields are not aligned beneath their heading"
+    }
+    $evidence.VisualCaptures += Save-WindowCapture $settingsHwnd (Join-Path $runtime 'settings-custom-enabled.png')
     $customValues = [ordered]@{ 1017 = '10'; 1018 = '20'; 1019 = '80'; 1020 = '90' }
     $appliedCustomValues = [ordered]@{}
     foreach ($entry in $customValues.GetEnumerator()) {
@@ -552,6 +755,8 @@ try {
             }
         }
     }
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    Start-Sleep -Milliseconds 180
     $evidence.CustomAllowedArea = [ordered]@{
         PersistedAllowedArea = Read-SettingLine $settingsPath 'allowedArea'
         PersistedMovementMode = Read-SettingLine $settingsPath 'movementMode'
@@ -562,6 +767,43 @@ try {
             Bottom = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1020 -Visible).Handle)
         }
         OverlayRects = Read-OverlayRects $process
+    }
+
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1037 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    $history = Get-MovementHistoryWindow $process
+    $historyChildren = @(Get-ChildWindows $history.Handle | Where-Object { $_.Visible })
+    foreach ($requiredText in @('Time tracked:', 'Least-used area:', 'Coverage:', 'Movement:')) {
+        if (@($historyChildren | Where-Object { $_.Text.StartsWith($requiredText) }).Count -ne 1) {
+            throw "Movement History is missing '$requiredText'"
+        }
+    }
+    $historyCapture = Join-Path $runtime 'movement-history.png'
+    $evidence.MovementHistory = [ordered]@{
+        Title = $history.Text
+        SummaryLabels = @($historyChildren | Where-Object { $_.Text -match '^(Time tracked|Least-used area|Coverage|Movement):' } | ForEach-Object { $_.Text })
+        Capture = Save-WindowCapture $history.Handle $historyCapture
+    }
+    [AocUiNative]::SendMessage($history.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # WM_CLOSE/hide
+
+    [AocUiNative]::SelectTabByKey($tab.Handle, 0)
+    Start-Sleep -Milliseconds 120
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1002 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1038 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # BM_CLICK
+    Start-Sleep -Milliseconds 250
+    $secondRects = @()
+    for ($sample = 0; $sample -lt 4; $sample++) {
+        $secondRects += Read-OverlayRects $process
+        Start-Sleep -Milliseconds 1100
+    }
+    $visibleSecondRects = @($secondRects | Where-Object { $_.Visible })
+    if ($visibleSecondRects.Count -ne 4) { throw 'Clock was not visible for every seconds-stability sample' }
+    $anchorPositions = @($visibleSecondRects | ForEach-Object { "$($_.Left),$($_.Top)" } | Select-Object -Unique)
+    if ($anchorPositions.Count -ne 1) {
+        throw "Seconds changed the clock anchor: $($anchorPositions -join '; ')"
+    }
+    $evidence.SecondsStability = [ordered]@{
+        Samples = $visibleSecondRects
+        UniqueAnchorPositions = $anchorPositions
     }
 
     [AocUiNative]::SendMessage($settingsHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null # WM_CLOSE/hide
@@ -585,6 +827,12 @@ try {
             Top = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1018 -Visible).Handle)
             Right = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1019 -Visible).Handle)
             Bottom = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1020 -Visible).Handle)
+            Hours = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1012 -Visible).Handle)
+            Minutes = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1021 -Visible).Handle)
+            Seconds = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1022 -Visible).Handle)
+            MicroShiftEnabled = ([int64]([AocUiNative]::SendMessage((Get-Control $settingsHwnd 1013 -Visible).Handle, 0x00F0, [IntPtr]::Zero, [IntPtr]::Zero)) -eq 1)
+            MicroShiftCount = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1023 -Visible).Handle)
+            LocalRadius = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1024 -Visible).Handle)
         }
     }
 }

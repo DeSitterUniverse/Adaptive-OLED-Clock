@@ -18,20 +18,21 @@ SettingsChange classifySettingsChange(const Settings& previous, const Settings& 
     change.movementModeChanged = previous.movementMode != current.movementMode;
     change.placementPolicyChanged = change.movementModeChanged ||
                                     previous.allowedArea != current.allowedArea ||
-                                    previous.excludedAreas != current.excludedAreas ||
                                     previous.edgeMarginDip != current.edgeMarginDip ||
-                                    previous.preferredPosition != current.preferredPosition ||
-                                    previous.preferredPositionEnabled != current.preferredPositionEnabled;
+                                    previous.localAreaRadiusPx != current.localAreaRadiusPx ||
+                                    previous.localAreaAnchor != current.localAreaAnchor ||
+                                    previous.localAreaAnchorSet != current.localAreaAnchorSet;
     change.monitorSelectionChanged = previous.monitorMode != current.monitorMode ||
                                      previous.fixedMonitorKey != current.fixedMonitorKey;
-    change.movementIntervalChanged = previous.movementIntervalMinutes != current.movementIntervalMinutes;
+    change.movementIntervalChanged = previous.movementIntervalSeconds != current.movementIntervalSeconds;
+    change.microShiftChanged = previous.microShiftEnabled != current.microShiftEnabled ||
+                               previous.microShiftCount != current.microShiftCount ||
+                               previous.microShiftDistancePx != current.microShiftDistancePx;
     change.hotkeyChanged = previous.hotkeyEnabled != current.hotkeyEnabled;
     change.startupChanged = previous.launchAtStartup != current.launchAtStartup;
     change.anyChanged = previous.version != current.version || change.appearanceChanged ||
                         change.placementPolicyChanged || change.monitorSelectionChanged ||
-                        change.movementIntervalChanged ||
-                        previous.microShiftEnabled != current.microShiftEnabled ||
-                        previous.microShiftRadiusDip != current.microShiftRadiusDip ||
+                        change.movementIntervalChanged || change.microShiftChanged ||
                         previous.hideInFullscreen != current.hideInFullscreen ||
                         change.startupChanged || change.hotkeyChanged ||
                         previous.clockVisible != current.clockVisible ||
