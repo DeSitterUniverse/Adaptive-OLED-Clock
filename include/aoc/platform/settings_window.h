@@ -62,7 +62,9 @@ private:
     void applyVisualTheme();
     void drawButton(const DRAWITEMSTRUCT& item) const;
     void drawTab(const DRAWITEMSTRUCT& item) const;
+    void paintTabs(HDC dc) const;
     static LRESULT CALLBACK pageControlSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    static LRESULT CALLBACK tabControlSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
     [[nodiscard]] int scale(int value) const noexcept;
     [[nodiscard]] HWND addControl(int page, DWORD style, const wchar_t* className,
                                   const wchar_t* text, int id, int x = 0, int y = 0,

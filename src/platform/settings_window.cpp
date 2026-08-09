@@ -267,6 +267,27 @@ LRESULT CALLBACK SettingsWindow::pageControlSubclassProc(HWND control, UINT mess
     return DefSubclassProc(control, message, wParam, lParam);
 }
 
+LRESULT CALLBACK SettingsWindow::tabControlSubclassProc(HWND control, UINT message, WPARAM wParam,
+                                                        LPARAM lParam, UINT_PTR subclassId,
+                                                        DWORD_PTR refData) {
+    (void)subclassId;
+    auto* self = reinterpret_cast<SettingsWindow*>(refData);
+    if (!self) return DefSubclassProc(control, message, wParam, lParam);
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(control, &paint);
+        self->paintTabs(dc);
+        EndPaint(control, &paint);
+        return 0;
+    }
+    if (message == WM_PRINTCLIENT) {
+        self->paintTabs(reinterpret_cast<HDC>(wParam));
+        return 0;
+    }
+    if (message == WM_ERASEBKGND) return 1;
+    return DefSubclassProc(control, message, wParam, lParam);
+}
+
 void SettingsWindow::addPageControl(int page, HWND control) {
     if (control && page >= 0 && page < static_cast<int>(pages_.size())) {
         pages_[static_cast<std::size_t>(page)].controls.push_back(control);
@@ -376,6 +397,8 @@ bool SettingsWindow::createControls() {
     if (tabs_) {
         allControls_.push_back(tabs_);
         setControlFont(tabs_, controlFont_.get());
+        SetWindowSubclass(tabs_, &SettingsWindow::tabControlSubclassProc, 2,
+                          reinterpret_cast<DWORD_PTR>(this));
         for (const wchar_t* title : {L"Clock", L"Movement", L"Display & Windows"}) {
             TCITEMW item{TCIF_TEXT};
             item.pszText = const_cast<wchar_t*>(title);
@@ -613,6 +636,45 @@ void SettingsWindow::drawTab(const DRAWITEMSTRUCT& item) const {
     HFONT font = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0));
     const HGDIOBJ previousFont = font ? SelectObject(dc, font) : nullptr;
     DrawTextW(dc, label, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    if (previousFont) SelectObject(dc, previousFont);
+}
+
+void SettingsWindow::paintTabs(HDC dc) const {
+    if (!dc || !tabs_) return;
+    RECT client{};
+    if (!GetClientRect(tabs_, &client)) return;
+    FillRect(dc, &client, stockBrush(dc, kSurfaceColor));
+
+    const int count = std::max(1, TabCtrl_GetItemCount(tabs_));
+    RECT nativeItem{};
+    const int headerBottom = TabCtrl_GetItemRect(tabs_, 0, &nativeItem)
+        ? std::clamp(static_cast<int>(nativeItem.bottom), 1, static_cast<int>(client.bottom))
+        : std::min(scale(40), static_cast<int>(client.bottom));
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(tabs_, WM_GETFONT, 0, 0));
+    const HGDIOBJ previousFont = font ? SelectObject(dc, font) : nullptr;
+    SetBkMode(dc, TRANSPARENT);
+
+    for (int index = 0; index < count; ++index) {
+        RECT bounds{client.left + index * (client.right - client.left) / count,
+                    client.top,
+                    client.left + (index + 1) * (client.right - client.left) / count,
+                    headerBottom};
+        const bool selected = index == activeTab_;
+        FillRect(dc, &bounds, stockBrush(dc, selected ? kAccentSoftColor : kSurfaceColor));
+        if (selected) {
+            RECT accent = bounds;
+            accent.top = accent.bottom - scale(3);
+            FillRect(dc, &accent, stockBrush(dc, kAccentColor));
+        }
+
+        wchar_t label[128]{};
+        TCITEMW item{TCIF_TEXT};
+        item.pszText = label;
+        item.cchTextMax = static_cast<int>(std::size(label));
+        (void)TabCtrl_GetItem(tabs_, index, &item);
+        SetTextColor(dc, selected ? kAccentColor : kMutedTextColor);
+        DrawTextW(dc, label, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
     if (previousFont) SelectObject(dc, previousFont);
 }
 
@@ -883,6 +945,7 @@ void SettingsWindow::setActiveTab(int tab) {
     activeTab_ = std::clamp(tab, 0, 2);
     verticalOffset_ = 0;
     if (tabs_) TabCtrl_SetCurSel(tabs_, activeTab_);
+    if (tabs_) InvalidateRect(tabs_, nullptr, FALSE);
     RECT client{};
     GetClientRect(hwnd_, &client);
     layoutControls(client.right, client.bottom);
