@@ -18,7 +18,11 @@ settings.conf
 exposure.dat
 app.log
 *.csv
-/tests/
+# Local exploratory QA helpers (automated suites under tests/ are versioned).
+/tests/manual_qa.md
+/tests/qa_ui_mutate.ps1
+/tests/qa_ui_overlay.ps1
+/tests/qa_ui_reopen.ps1
 /qa/
 /screenshots/
 /runtime/

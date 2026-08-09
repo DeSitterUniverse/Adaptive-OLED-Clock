@@ -2,6 +2,7 @@
 
 #include "aoc/core/settings.h"
 #include "aoc/core/types.h"
+#include "aoc/platform/win32_raii.h"
 
 #include <windows.h>
 
@@ -33,10 +34,20 @@ public:
 private:
     static LRESULT CALLBACK windowProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam);
-    void createControls();
+    bool createControls();
+    bool createClockPage();
+    bool createMovementPage();
+    bool createDisplayPage();
+    bool createStatisticsPage();
     void layoutControls(int width, int height);
     void setActiveTab(int tab);
     void syncToControls();
+    void syncClockPage();
+    void syncMovementPage();
+    void syncDisplayPage();
+    void readClockPage(core::Settings& next) const;
+    void readMovementPage(core::Settings& next) const;
+    void readDisplayPage(core::Settings& next) const;
     void applyFromControls(bool committed = true);
     void addExcludedArea();
     void removeSelectedExcludedArea();
@@ -53,8 +64,12 @@ private:
     [[nodiscard]] HWND addControl(int page, DWORD style, const wchar_t* className,
                                   const wchar_t* text, int id, int x = 0, int y = 0,
                                   int width = 0, int height = 0, DWORD exStyle = 0);
-    void addLabel(int page, const wchar_t* text);
+    [[nodiscard]] HWND addLabel(int page, const wchar_t* text);
     void addPageControl(int page, HWND control);
+
+    struct PageControls {
+        std::vector<HWND> controls;
+    };
 
     HINSTANCE instance_{nullptr};
     HWND owner_{nullptr};
@@ -69,34 +84,49 @@ private:
     bool syncing_{false};
     int activeTab_{0};
     UINT dpi_{96};
-    HFONT controlFont_{nullptr};
-    std::array<std::vector<HWND>, 4> pageControls_;
+    UniqueGdiFont controlFont_;
+    std::array<PageControls, 4> pages_;
+    std::vector<HWND> allControls_;
+    bool controlCreationFailed_{false};
 
     HWND tabs_{nullptr};
     HWND pageHost_{nullptr};
+    HWND timeFormatLabel_{nullptr};
     HWND timeFormat_{nullptr};
     HWND showAmPm_{nullptr};
     HWND showSeconds_{nullptr};
     HWND showDate_{nullptr};
     HWND fontFamily_{nullptr};
+    HWND fontFamilyLabel_{nullptr};
     HWND fontWeight_{nullptr};
+    HWND fontWeightLabel_{nullptr};
     HWND fontSize_{nullptr};
+    HWND fontSizeLabel_{nullptr};
     HWND fontSizeValue_{nullptr};
     HWND colorButton_{nullptr};
+    HWND colorLabel_{nullptr};
     HWND opacity_{nullptr};
+    HWND opacityLabel_{nullptr};
     HWND opacityValue_{nullptr};
     HWND boostOpacity_{nullptr};
+    HWND boostOpacityLabel_{nullptr};
     HWND boostOpacityValue_{nullptr};
     HWND boostDuration_{nullptr};
+    HWND boostDurationLabel_{nullptr};
 
     HWND movementMode_{nullptr};
+    HWND movementModeLabel_{nullptr};
     HWND interval_{nullptr};
+    HWND intervalLabel_{nullptr};
     HWND microShiftEnabled_{nullptr};
     HWND microShiftRadius_{nullptr};
+    HWND microShiftRadiusLabel_{nullptr};
     HWND microShiftRadiusValue_{nullptr};
     HWND edgeMargin_{nullptr};
+    HWND edgeMarginLabel_{nullptr};
     HWND edgeMarginValue_{nullptr};
     HWND allowedPreset_{nullptr};
+    HWND allowedPresetLabel_{nullptr};
     HWND allowedAreaHelp_{nullptr};
     HWND allowedLeftLabel_{nullptr};
     HWND allowedTopLabel_{nullptr};
@@ -108,6 +138,7 @@ private:
     HWND allowedBottom_{nullptr};
     HWND preferredEnabled_{nullptr};
     HWND preferredSummary_{nullptr};
+    HWND excludedAreaLabel_{nullptr};
     HWND excludedLeft_{nullptr};
     HWND excludedTop_{nullptr};
     HWND excludedRight_{nullptr};
@@ -118,11 +149,17 @@ private:
     HWND excludedClear_{nullptr};
 
     HWND monitorMode_{nullptr};
+    HWND monitorModeLabel_{nullptr};
     HWND fullscreen_{nullptr};
     HWND startup_{nullptr};
     HWND hotkey_{nullptr};
+    HWND displayHelp_{nullptr};
+
+    HWND statisticsExplanation_{nullptr};
+    HWND statisticsHelp_{nullptr};
 
     HWND statisticsButton_{nullptr};
+    HWND autoSaveLabel_{nullptr};
     HWND resetButton_{nullptr};
     HWND presetButton_{nullptr};
     HWND positioningButton_{nullptr};

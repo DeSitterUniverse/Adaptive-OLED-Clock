@@ -10,6 +10,7 @@ add_library(aoc_core STATIC
     src/core/types.cpp
     src/core/geometry.cpp
     src/core/settings.cpp
+    src/core/settings_change.cpp
     src/core/clock.cpp
     src/core/exposure.cpp
     src/core/placement.cpp
@@ -33,6 +34,7 @@ add_executable(adaptive_oled_clock WIN32
     src/platform/monitor_service.cpp
     src/platform/fullscreen_service.cpp
     src/platform/startup.cpp
+    src/platform/win32_ui.cpp
     src/platform/settings_window.cpp
     src/platform/statistics_window.cpp
 )

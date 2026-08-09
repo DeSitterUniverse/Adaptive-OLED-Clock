@@ -12,6 +12,7 @@
 #include "aoc/platform/renderer.h"
 #include "aoc/platform/settings_window.h"
 #include "aoc/platform/statistics_window.h"
+#include "aoc/platform/win32_raii.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -102,7 +103,7 @@ private:
     std::uint64_t placementSeed_{0xA0C0C0DEULL};
     std::vector<core::RectI> macroHistory_;
     core::RectI macroAnchorRect_{};
-    HANDLE singletonMutex_{nullptr};
+    UniqueKernelHandle singletonMutex_;
     UINT taskbarCreatedMessage_{0};
 
     DataPaths paths_;
@@ -124,10 +125,10 @@ private:
     OverlayWindow overlay_;
     SettingsWindow settingsWindow_;
     StatisticsWindow statisticsWindow_;
-    HWINEVENTHOOK foregroundHook_{nullptr};
-    HWINEVENTHOOK locationChangeHook_{nullptr};
-    HPOWERNOTIFY consoleDisplayPower_{nullptr};
-    HPOWERNOTIFY monitorPower_{nullptr};
+    UniqueWinEventHook foregroundHook_;
+    UniqueWinEventHook locationChangeHook_;
+    UniquePowerNotification consoleDisplayPower_;
+    UniquePowerNotification monitorPower_;
     DWORD sessionNotificationId_{0};
 };
 

@@ -4,8 +4,10 @@
 #include "aoc/core/geometry.h"
 #include "aoc/core/monitor.h"
 #include "aoc/core/placement.h"
+#include "aoc/core/settings_change.h"
 #include "aoc/platform/fullscreen_service.h"
 #include "aoc/platform/startup.h"
+#include "aoc/platform/win32_ui.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -63,15 +65,6 @@ std::wstring modulePath() {
     return path;
 }
 
-std::wstring fromUtf8(const std::string& value) {
-    if (value.empty()) return {};
-    const int required = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (required <= 0) return {};
-    std::wstring result(static_cast<std::size_t>(required), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), required);
-    return result;
-}
-
 std::string csvQuote(const std::string& value) {
     std::string result = "\"";
     for (const char character : value) {
@@ -124,7 +117,7 @@ bool App::initialize() {
     if (initialized_) return true;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    singletonMutex_ = CreateMutexW(nullptr, FALSE, kSingleInstanceName);
+    singletonMutex_.reset(CreateMutexW(nullptr, FALSE, kSingleInstanceName));
     if (!singletonMutex_) {
         logger_.error(L"Could not create the single-instance guard");
         return false;
@@ -134,8 +127,7 @@ bool App::initialize() {
         const HWND existing = FindWindowExW(HWND_MESSAGE, nullptr, kControllerClass, nullptr);
         if (existing) PostMessageW(existing, kShowSettingsMessage, 0, 0);
         anotherInstance_ = true;
-        CloseHandle(singletonMutex_);
-        singletonMutex_ = nullptr;
+        singletonMutex_.reset();
         return false;
     }
     taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
@@ -197,7 +189,7 @@ bool App::initialize() {
 
     core::SizeD initialText{};
     core::SizeD initialSurface{};
-    if (!renderer_.renderText(currentTimeText(), fromUtf8(settings_.fontFamily), settings_.fontWeight,
+    if (!renderer_.renderText(currentTimeText(), wideFromUtf8(settings_.fontFamily), settings_.fontWeight,
                               settings_.fontSizeDip, settings_.textColor, currentOpacity(), 96, false,
                               initialText, initialSurface)) {
         logger_.error(L"Initial clock text rendering failed");
@@ -246,10 +238,7 @@ void App::shutdown() {
         CoUninitialize();
         comInitialized_ = false;
     }
-    if (singletonMutex_) {
-        CloseHandle(singletonMutex_);
-        singletonMutex_ = nullptr;
-    }
+    singletonMutex_.reset();
     g_eventApp = nullptr;
     initialized_ = false;
 }
@@ -273,17 +262,17 @@ void App::initializeSystemIntegrations() {
     if (!WTSRegisterSessionNotification(controller_, NOTIFY_FOR_THIS_SESSION)) {
         logger_.warning(L"Could not register session notifications");
     }
-    consoleDisplayPower_ = RegisterPowerSettingNotification(controller_, &GUID_CONSOLE_DISPLAY_STATE,
-                                                            DEVICE_NOTIFY_WINDOW_HANDLE);
-    monitorPower_ = RegisterPowerSettingNotification(controller_, &GUID_MONITOR_POWER_ON,
-                                                      DEVICE_NOTIFY_WINDOW_HANDLE);
-    foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
-                                       &App::winEventProc, 0, 0,
-                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    consoleDisplayPower_.reset(RegisterPowerSettingNotification(controller_, &GUID_CONSOLE_DISPLAY_STATE,
+                                                                 DEVICE_NOTIFY_WINDOW_HANDLE));
+    monitorPower_.reset(RegisterPowerSettingNotification(controller_, &GUID_MONITOR_POWER_ON,
+                                                           DEVICE_NOTIFY_WINDOW_HANDLE));
+    foregroundHook_.reset(SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+                                           &App::winEventProc, 0, 0,
+                                           WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS));
     if (!foregroundHook_) logger_.warning(L"Could not register foreground WinEvent hook");
-    locationChangeHook_ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
-                                          &App::winEventProc, 0, 0,
-                                          WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    locationChangeHook_.reset(SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
+                                               &App::winEventProc, 0, 0,
+                                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS));
     if (!locationChangeHook_) logger_.warning(L"Could not register location-change WinEvent hook");
 }
 
@@ -298,14 +287,10 @@ void App::unregisterSystemIntegrations() {
         UnregisterHotKey(controller_, kPositioningEscapeHotkeyId);
         WTSUnRegisterSessionNotification(controller_);
     }
-    if (consoleDisplayPower_) UnregisterPowerSettingNotification(consoleDisplayPower_);
-    if (monitorPower_) UnregisterPowerSettingNotification(monitorPower_);
-    consoleDisplayPower_ = nullptr;
-    monitorPower_ = nullptr;
-    if (foregroundHook_) UnhookWinEvent(foregroundHook_);
-    foregroundHook_ = nullptr;
-    if (locationChangeHook_) UnhookWinEvent(locationChangeHook_);
-    locationChangeHook_ = nullptr;
+    consoleDisplayPower_.reset();
+    monitorPower_.reset();
+    foregroundHook_.reset();
+    locationChangeHook_.reset();
 }
 
 void App::createTrayIcon() {
@@ -514,7 +499,7 @@ void App::renderAndPresent() {
     const std::uint32_t dpi = selectedMonitor_->dpiX == 0 ? 96 : selectedMonitor_->dpiX;
     core::SizeD measuredText{};
     core::SizeD measuredSurface{};
-    if (!renderer_.renderText(currentTimeText(), fromUtf8(settings_.fontFamily), settings_.fontWeight,
+    if (!renderer_.renderText(currentTimeText(), wideFromUtf8(settings_.fontFamily), settings_.fontWeight,
                               settings_.fontSizeDip, settings_.textColor, currentOpacity(), dpi, positioning_,
                               measuredText, measuredSurface)) {
         logger_.error(L"Clock text rendering failed");
@@ -739,54 +724,8 @@ void App::applySettings(const core::Settings& incoming, bool committed) {
     core::Settings next = incoming;
     next.validateAndNormalize();
 
-    struct SettingsDiff {
-        bool secondsChanged{false};
-        bool appearanceChanged{false};
-        bool movementModeChanged{false};
-        bool placementPolicyChanged{false};
-        bool monitorSelectionChanged{false};
-        bool movementIntervalChanged{false};
-        bool hotkeyChanged{false};
-        bool startupChanged{false};
-        bool anyChanged{false};
-    };
-    const auto diffSettings = [](const core::Settings& previous, const core::Settings& current) {
-        SettingsDiff diff;
-        diff.secondsChanged = previous.showSeconds != current.showSeconds;
-        diff.appearanceChanged = previous.timeFormat != current.timeFormat ||
-                                 previous.showAmPm != current.showAmPm ||
-                                 previous.showSeconds != current.showSeconds ||
-                                 previous.showDate != current.showDate ||
-                                 previous.fontFamily != current.fontFamily ||
-                                 previous.fontWeight != current.fontWeight ||
-                                 previous.fontSizeDip != current.fontSizeDip ||
-                                 previous.textColor != current.textColor ||
-                                 previous.opacity != current.opacity ||
-                                 previous.boostOpacity != current.boostOpacity;
-        diff.movementModeChanged = previous.movementMode != current.movementMode;
-        diff.placementPolicyChanged = diff.movementModeChanged ||
-                                      previous.allowedArea != current.allowedArea ||
-                                      previous.excludedAreas != current.excludedAreas ||
-                                      previous.edgeMarginDip != current.edgeMarginDip ||
-                                      previous.preferredPosition != current.preferredPosition ||
-                                      previous.preferredPositionEnabled != current.preferredPositionEnabled;
-        diff.monitorSelectionChanged = previous.monitorMode != current.monitorMode ||
-                                       previous.fixedMonitorKey != current.fixedMonitorKey;
-        diff.movementIntervalChanged = previous.movementIntervalMinutes != current.movementIntervalMinutes;
-        diff.hotkeyChanged = previous.hotkeyEnabled != current.hotkeyEnabled;
-        diff.startupChanged = previous.launchAtStartup != current.launchAtStartup;
-        diff.anyChanged = previous.version != current.version || diff.appearanceChanged || diff.placementPolicyChanged ||
-                          diff.monitorSelectionChanged || diff.movementIntervalChanged ||
-                          previous.microShiftEnabled != current.microShiftEnabled ||
-                          previous.microShiftRadiusDip != current.microShiftRadiusDip ||
-                          previous.hideInFullscreen != current.hideInFullscreen ||
-                          diff.startupChanged || diff.hotkeyChanged || previous.clockVisible != current.clockVisible ||
-                          previous.boostDurationSeconds != current.boostDurationSeconds;
-        return diff;
-    };
-
-    const SettingsDiff liveDiff = diffSettings(previousLive, next);
-    const SettingsDiff committedDiff = diffSettings(previousCommitted, next);
+    const core::SettingsChange liveDiff = core::classifySettingsChange(previousLive, next);
+    const core::SettingsChange committedDiff = core::classifySettingsChange(previousCommitted, next);
     // The live state drives previews; the committed baseline drives persistence,
     // registry/hotkey integrations, placement refreshes, and deferred timers.
     const bool changed = liveDiff.anyChanged || (committed && committedDiff.anyChanged);

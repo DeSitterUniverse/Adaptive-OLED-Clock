@@ -2,6 +2,7 @@
 
 #include "aoc/core/exposure.h"
 #include "aoc/core/types.h"
+#include "aoc/platform/win32_raii.h"
 
 #include <windows.h>
 
@@ -48,7 +49,8 @@ private:
     HWND owner_{nullptr};
     HWND hwnd_{nullptr};
     UINT dpi_{96};
-    HFONT controlFont_{nullptr};
+    UniqueGdiFont controlFont_;
+    std::vector<HWND> controls_;
     HWND monitorCombo_{nullptr};
     HWND totalLabel_{nullptr};
     HWND leastLabel_{nullptr};
