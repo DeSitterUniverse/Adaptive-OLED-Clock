@@ -92,6 +92,12 @@ enum class TimeFormat : std::uint8_t {
 enum class MovementMode : std::uint8_t {
     WholeScreen = 0,
     LocalWander = 1,
+    EdgeOnly = 2,
+};
+
+enum class FontWeight : std::uint8_t {
+    Normal = 0,
+    SemiBold = 1,
 };
 
 enum class MonitorMode : std::uint8_t {

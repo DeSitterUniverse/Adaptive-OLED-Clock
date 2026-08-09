@@ -17,8 +17,11 @@ enum class LocaleHourMode : std::uint8_t {
 [[nodiscard]] std::wstring formatClockText(const std::tm& localTime,
                                             TimeFormat configured,
                                             bool showAmPm,
-                                            LocaleHourMode localeMode);
+                                            LocaleHourMode localeMode,
+                                            bool showSeconds = false);
 [[nodiscard]] std::chrono::system_clock::time_point nextMinuteBoundary(
+    std::chrono::system_clock::time_point now);
+[[nodiscard]] std::chrono::system_clock::time_point nextSecondBoundary(
     std::chrono::system_clock::time_point now);
 [[nodiscard]] LocaleHourMode localeHourModeFromPattern(const std::wstring& shortTimePattern) noexcept;
 

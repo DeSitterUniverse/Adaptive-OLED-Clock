@@ -20,6 +20,8 @@ struct PlacementContext {
     MovementMode mode{MovementMode::WholeScreen};
     std::optional<NormalizedPoint> preferredCenter;
     std::optional<RectI> previousRectPx;
+    std::vector<RectI> recentMacroRects;
+    double surfacePaddingDip{0.0};
     std::uint64_t randomSeed{0xA0C0C0DEULL};
 };
 
@@ -31,8 +33,16 @@ struct PlacementCandidate {
 
 [[nodiscard]] std::vector<RectI> generateCandidates(const PlacementContext& context);
 [[nodiscard]] bool isValidPlacement(const RectI& candidate, const PlacementContext& context);
+[[nodiscard]] RectI paddedPlacementRect(const RectI& candidate,
+                                        double paddingDip,
+                                        std::uint32_t dpi) noexcept;
 [[nodiscard]] std::optional<RectI> preferredPlacement(const PlacementContext& context);
 [[nodiscard]] std::optional<PlacementCandidate> choosePlacement(const PlacementContext& context,
                                                                   const ExposureMap& exposure);
+[[nodiscard]] RectI applyBoundedMicroShift(const RectI& currentRect,
+                                            const RectI& macroAnchorRect,
+                                            double radiusDip,
+                                            std::uint32_t dpi,
+                                            std::uint64_t randomSeed) noexcept;
 
 } // namespace aoc::core

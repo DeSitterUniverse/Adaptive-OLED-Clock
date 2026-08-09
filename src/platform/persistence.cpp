@@ -11,7 +11,13 @@ namespace aoc::platform {
 DataPaths resolveDataPaths() {
     PWSTR localAppData = nullptr;
     DataPaths paths;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData))) {
+    // An explicit LOCALAPPDATA is useful for portable smoke tests and keeps those runs out of the user's profile.
+    wchar_t environmentPath[MAX_PATH * 4]{};
+    const DWORD environmentLength = GetEnvironmentVariableW(L"LOCALAPPDATA", environmentPath,
+                                                              static_cast<DWORD>(std::size(environmentPath)));
+    if (environmentLength > 0 && environmentLength < std::size(environmentPath)) {
+        paths.root = std::filesystem::path(environmentPath) / L"AdaptiveOledClockCpp";
+    } else if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData))) {
         paths.root = std::filesystem::path(localAppData) / L"AdaptiveOledClockCpp";
         CoTaskMemFree(localAppData);
     } else {
@@ -85,7 +91,8 @@ LoadedData loadData(const DataPaths& paths) {
         const auto result = core::deserializeSettings(contents);
         data.settings = result.value;
         data.settingsRecovered = result.recovered;
-        if (result.recovered) (void)quarantineCorruptFile(paths.settingsFile);
+        data.settingsMigrated = result.migrated;
+        if (result.recovered && !result.migrated) (void)quarantineCorruptFile(paths.settingsFile);
     }
     if (readUtf8File(paths.exposureFile, contents)) {
         const auto result = core::deserializeExposure(contents);

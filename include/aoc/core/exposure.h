@@ -17,6 +17,10 @@ struct ExposureMap {
     [[nodiscard]] double weightedExposure(const NormalizedRect& renderedBounds) const noexcept;
     [[nodiscard]] double totalSeconds() const noexcept;
     [[nodiscard]] double cell(std::size_t column, std::size_t row) const noexcept;
+    [[nodiscard]] std::pair<std::size_t, std::size_t> leastExposedCell() const noexcept;
+    [[nodiscard]] std::pair<std::size_t, std::size_t> mostExposedCell() const noexcept;
+    [[nodiscard]] double imbalance() const noexcept;
+    void reset() noexcept { seconds.fill(0.0); }
 };
 
 class ExposureStore {

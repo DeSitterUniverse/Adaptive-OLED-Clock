@@ -49,13 +49,29 @@ double iou(const RectI& first, const RectI& second) {
     return unionArea <= 0.0 ? 0.0 : overlapArea / unionArea;
 }
 
+double proximityPenalty(const RectI& candidate, const RectI& previous) {
+    const PointD currentCenter = candidate.center();
+    const PointD previousCenter = previous.center();
+    const double distance = std::hypot(currentCenter.x - previousCenter.x, currentCenter.y - previousCenter.y);
+    const double scale = std::max(1.0, std::hypot(candidate.width(), candidate.height()));
+    return std::exp(-distance / (scale * 2.5)) * 70.0;
+}
+
 } // namespace
+
+RectI paddedPlacementRect(const RectI& candidate, double paddingDip, std::uint32_t dpi) noexcept {
+    if (!candidate.isValid()) return {};
+    const int padding = std::max(0, static_cast<int>(std::lround(dipToPixels(paddingDip, dpi))));
+    return {candidate.left - padding, candidate.top - padding,
+            candidate.right + padding, candidate.bottom + padding};
+}
 
 bool isValidPlacement(const RectI& candidate, const PlacementContext& context) {
     const RectI bounds = movementBounds(context);
-    if (!candidate.isValid() || !bounds.contains(candidate)) return false;
+    const RectI surface = paddedPlacementRect(candidate, context.surfacePaddingDip, context.dpi);
+    if (!candidate.isValid() || !surface.isValid() || !bounds.contains(surface)) return false;
     for (const NormalizedRect& exclusion : context.excludedAreas) {
-        if (candidate.intersects(normalizedToPhysicalPixels(exclusion, context.monitorBoundsPx))) return false;
+        if (surface.intersects(normalizedToPhysicalPixels(exclusion, context.monitorBoundsPx))) return false;
     }
     return true;
 }
@@ -74,7 +90,19 @@ std::vector<RectI> generateCandidates(const PlacementContext& context) {
         if (isValidPlacement(candidate, context)) result.push_back(candidate);
     };
 
-    if (context.mode == MovementMode::WholeScreen) {
+    if (context.mode == MovementMode::EdgeOnly) {
+        // Edge-only deliberately samples the perimeter after margins and padding; there are no interior anchors.
+        constexpr int samples = 17;
+        for (int index = 0; index < samples; ++index) {
+            const double fraction = samples == 1 ? 0.0 : static_cast<double>(index) / (samples - 1);
+            const double x = minCenterX + (maxCenterX - minCenterX) * fraction;
+            const double y = minCenterY + (maxCenterY - minCenterY) * fraction;
+            addCenter({x, minCenterY});
+            addCenter({x, maxCenterY});
+            addCenter({minCenterX, y});
+            addCenter({maxCenterX, y});
+        }
+    } else if (context.mode == MovementMode::WholeScreen) {
         constexpr int columns = 13;
         constexpr int rows = 9;
         for (int row = 0; row < rows; ++row) {
@@ -124,15 +152,15 @@ std::optional<PlacementCandidate> choosePlacement(const PlacementContext& contex
         const NormalizedRect normalized = physicalToNormalized(candidate, context.monitorBoundsPx);
         const double exposureScore = exposure.weightedExposure(normalized);
         double recentPenalty = 0.0;
-        if (context.previousRectPx.has_value()) {
-            const double overlap = iou(candidate, *context.previousRectPx);
-            const PointD currentCenter = candidate.center();
-            const PointD previousCenter = context.previousRectPx->center();
-            const double distance = std::hypot(currentCenter.x - previousCenter.x, currentCenter.y - previousCenter.y);
-            const double scale = std::max(1.0, std::hypot(candidate.width(), candidate.height()));
-            recentPenalty += overlap * 300.0;
-            recentPenalty += std::exp(-distance / (scale * 2.5)) * 55.0;
-            if (overlap > 0.70) recentPenalty += 250.0;
+        const auto addHistoryPenalty = [&](const RectI& previous, double weight) {
+            const double overlap = iou(candidate, previous);
+            recentPenalty += weight * (overlap * 520.0 + proximityPenalty(candidate, previous));
+            if (candidate == previous) recentPenalty += weight * 5000.0;
+        };
+        if (context.previousRectPx.has_value()) addHistoryPenalty(*context.previousRectPx, 1.0);
+        for (std::size_t index = 0; index < context.recentMacroRects.size(); ++index) {
+            const double weight = 1.0 / static_cast<double>(index + 1);
+            addHistoryPenalty(context.recentMacroRects[index], weight);
         }
         const double score = exposureScore + recentPenalty + random(generator) * 0.03;
         if (!best.has_value() || score < best->score) {
@@ -144,6 +172,23 @@ std::optional<PlacementCandidate> choosePlacement(const PlacementContext& contex
         best = PlacementCandidate{candidate, exposure.weightedExposure(physicalToNormalized(candidate, context.monitorBoundsPx)), 0.0};
     }
     return best;
+}
+
+RectI applyBoundedMicroShift(const RectI& currentRect,
+                             const RectI& macroAnchorRect,
+                             double radiusDip,
+                             std::uint32_t dpi,
+                             std::uint64_t randomSeed) noexcept {
+    if (!currentRect.isValid()) return {};
+    const RectI origin = macroAnchorRect.isValid() ? macroAnchorRect : currentRect;
+    const int radius = std::max(0, static_cast<int>(std::lround(dipToPixels(std::max(0.0, radiusDip), dpi))));
+    if (radius == 0) return origin;
+    std::mt19937_64 generator(randomSeed);
+    std::uniform_int_distribution<int> offset(-radius, radius);
+    const int dx = offset(generator);
+    const int dy = offset(generator);
+    return {origin.left + dx, origin.top + dy,
+            origin.right + dx, origin.bottom + dy};
 }
 
 } // namespace aoc::core

@@ -1,73 +1,113 @@
-# Adaptive OLED Clock (native C++ Phase 1)
+# Adaptive OLED Clock
 
-Adaptive OLED Clock is a small, native Windows desktop clock designed to reduce static OLED wear while remaining unobtrusive. This repository contains the standalone C++20/Win32 implementation of Phase 1 only. It has no web UI, Electron runtime, telemetry, or third-party UI/JSON/testing framework.
+Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keeps the current time visible in a transparent, click-through overlay while varying the clock's position so that exposure is not concentrated in one fixed area of the screen. The application is written in C++20 with Win32, Direct2D, and DirectWrite, and has no web, network, or telemetry dependency.
 
-## Build and run
+## Features
 
-From a Developer PowerShell with Visual Studio Build Tools and CMake available:
+- Transparent, topmost, non-activating, click-through clock overlay with tray-resident operation.
+- Locale-derived, 12-hour, or 24-hour time; optional AM/PM, seconds, and locale-formatted date.
+- Configurable font family, weight, size, text color, and normal opacity.
+- Temporary brightness from the tray or settings, with a configurable boost opacity and automatic restoration.
+- Exposure-balanced macro movement with an edge-only default profile: 45% normal opacity, 5-minute major moves, enabled 8 DIP minute micro-shifts, and a 24 DIP edge margin. Whole-screen movement and local wander are also available.
+- Allowed movement areas, excluded rectangles, edge margins, monitor selection, and manual positioning controls.
+- Independent 12-by-8 exposure history for each recognized monitor.
+- Exposure heatmaps and summary statistics, with reset and CSV export actions.
+- Fullscreen hiding plus handling for monitor changes, DPI changes, time and time-zone changes, display power, lock/unlock, and sleep/resume.
+- Optional launch at Windows startup and the default `Ctrl+Alt+C` visibility hotkey.
+- Single-instance behavior, tray recovery, atomic local persistence, and corruption recovery for local data.
+- No telemetry, network calls, account, or remote synchronization.
+
+## OLED protection model
+
+The clock uses a small, practical exposure model rather than a panel-specific lifetime prediction:
+
+1. Each monitor is represented by a 12-by-8 grid.
+2. While the clock is visible and the display/session policy allows charging, each visible interval is added to the cells covered by the clock. Cells receive exposure in proportion to the clock rectangle's overlap with them.
+3. When the clock moves, candidate positions are scored using accumulated exposure, recent-position penalties, movement rules, allowed areas, and exclusions. The default edge-only mode keeps candidates around the usable screen perimeter; whole-screen and local-wander modes are available when preferred.
+
+The history is maintained independently for each monitor identity, so one display's exposure does not affect another display's placement decisions. Bounded micro-shifts add small movement between larger moves without making the clock unpredictable.
+
+## Requirements
+
+- A 64-bit Windows desktop environment.
+- CMake and a C++20-capable Visual Studio/MSVC toolchain for building.
+- Windows' built-in Win32, Direct2D, and DirectWrite components.
+
+The application itself does not require a web server, scripting runtime, third-party UI framework, or network service.
+
+## Building
+
+Open a Developer PowerShell with CMake and the Visual Studio C++ tools available, then run from this directory:
 
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-.\build\Release\adaptive_oled_clock.exe
 ```
 
-The clean build uses the installed Visual Studio generator. The application is a tray-resident process; its settings window is opened from the tray menu. The global default hotkey is `Ctrl+Alt+C`.
+The Release executable is:
 
-## Phase 1 feature summary
-
-- Native Unicode Win32 popup overlay rendered with Direct2D and DirectWrite into a premultiplied DIB and presented with `UpdateLayeredWindow`.
-- Per-monitor-V2 DPI awareness, DPI-sharp normal-weight 32 DIP text, transparent background, topmost/click-through/non-activating overlay, no taskbar or Alt+Tab entry.
-- Locale-derived time format with explicit 12-hour and 24-hour choices, optional AM/PM, no seconds, and no date.
-- OLED-safe defaults: `#B0B0B0` text, 0.32 normal opacity, 5-minute major movement, one-minute micro-shifts up to +/-2 DIP, 24 DIP edge margin, fullscreen hiding enabled, primary-monitor following, startup disabled, and `Ctrl+Alt+C` enabled.
-- Real 12x8 exposure grid per stable monitor identity. Exposure is charged using monotonic elapsed time and intersection-area weighting only while the clock is effectively visible, the display/session permits charging, and fullscreen policy allows it.
-- Dynamic whole-screen lattice/anchor placement and local-wander candidates, normalized allowed/excluded areas, edge margins, recent-position/overlap penalties, deterministic low-noise tie breaking, and immediate-repeat avoidance.
-- Follow-primary or fixed-monitor selection with safe fallback to primary when a fixed monitor is missing.
-- One-shot scheduling against the next real system minute boundary; immediate handling of time/timezone, display, DPI, power, suspend/resume, session, and foreground/location changes.
-- Tray actions for visibility, temporary brightness, movement mode, opacity presets, settings, a lightweight exposure summary, drag positioning, and exit.
-- Modeless standard Win32 settings UI with live persistence for every Phase 1 setting, exclusion add/remove/clear controls, reset/default and OLED-safe preset actions, and ChooseColor.
-- Temporary brightness boost defaults to 0.85 opacity for 15 seconds and restores the configured normal opacity automatically.
-- HKCU Run startup registration, WTS session notifications, console/display power notifications, WinEvent foreground/location hooks, atomic temp-file replacement, corruption quarantine, and lightweight lifecycle/config/state logging.
-
-## Architecture
-
-`aoc_core` has no HWND or rendering dependency. It contains:
-
-- geometry and normalized/physical/DIP conversions;
-- versioned settings with migration/default validation;
-- minute-boundary/time-format decisions;
-- exposure maps, stores, persistence serialization, and monotonic visibility tracking;
-- monitor selection and stable identity data contracts;
-- fullscreen geometry heuristic;
-- placement generation, scoring, exclusions, margins, recent-position avoidance, and local wander.
-
-The Win32 host contains the D2D/DirectWrite renderer, layered overlay, tray integration, modeless settings controls, monitor enumeration, power/session/startup integration, WinEvent marshaling, persistence, logging, and application lifecycle. The startup order is load settings/exposure, resolve a monitor and placement, initialize system events/tray, then show only when policy permits.
-
-## OLED model
-
-The exposure grid is an intentionally small wear model rather than a panel-specific lifetime prediction. Each rendered clock rectangle is converted to monitor-normalized coordinates. For every elapsed visible interval, each intersected grid cell receives a share of elapsed time proportional to its overlap area. Placement then minimizes the cumulative weighted exposure of candidate rectangles, with strong recent-position penalties and a small random tie-breaker. This balances movement without claiming to model a particular OLED panel's physical aging curve.
-
-## Settings, exposure, and logs
-
-The application stores data under:
-
-`%LOCALAPPDATA%\AdaptiveOledClockCpp\`
-
-- `settings.conf` — documented versioned key/value settings format;
-- `exposure.dat` — versioned per-monitor 12x8 exposure maps;
-- `app.log` — low-volume startup, configuration, state, movement, recovery, and shutdown log.
-
-Settings and exposure writes use a sibling `.tmp` file followed by `MoveFileExW` with replace/write-through flags. Malformed existing files are renamed with a `.corrupt-<timestamp>` suffix before safe defaults are used when possible.
-
-## Tests
-
-The UI-independent test executable covers time-boundary/12-or-24-hour decisions, weighted visible-only exposure and independent monitor maps, exposure round-trips and recovery, placement validity/least-used behavior/repeat avoidance/local wander, mixed-DPI geometry, missing-monitor fallback, fullscreen positive/negative cases, and versioned settings round-trip/migration/recovery.
-
-```powershell
-ctest --test-dir build -C Release --output-on-failure
+```text
+build\Release\adaptive_oled_clock.exe
 ```
 
-## Phase 1 limitations
+## Running and using the clock
 
-This is a practical Phase 1 OLED-safety heuristic, not a panel lifetime guarantee. It does not implement Phase 2 analytics, historical dashboards, per-pixel calibration, remote synchronization, telemetry, or a browser-based interface. The stable monitor key uses the Windows display-device identity when available and falls back to the display name when Windows does not provide a device identifier.
+Run `build\Release\adaptive_oled_clock.exe`. The application stays in the Windows notification area while the clock overlay is shown on the selected monitor. The overlay does not take focus or intercept normal mouse clicks. If enabled, `Ctrl+Alt+C` toggles visibility.
+
+The clock responds to real minute boundaries and relevant Windows events. It hides during detected fullscreen use when that setting is enabled, pauses exposure charging when the display is off or the session is locked, and re-evaluates its monitor, DPI, position, and time display after system changes.
+
+Use the tray menu to show or hide the clock, activate temporary brightness, choose a movement mode or opacity preset, open Settings or Exposure Statistics, start drag-to-position mode, or exit. In drag-to-position mode, the overlay becomes temporarily interactive and stores the resulting position when positioning ends.
+
+A second launch hands off to the existing instance and opens Settings instead of creating another clock. If Windows Explorer restarts, the application recreates its notification-area icon.
+
+## Settings and tray basics
+
+The Settings window groups controls into four areas:
+
+- **Clock** — time format, AM/PM, seconds, date, font family, font weight, font size, color, normal opacity, and temporary brightness values.
+- **Movement & OLED** — movement interval, edge-only/whole-screen/local-wander mode, micro-shift bounds, edge margin, allowed area, and excluded areas.
+- **Display & Windows** — follow-primary or fixed-monitor selection, fullscreen hiding, startup registration, and the global hotkey.
+- **Statistics** — an explanation of how exposure is charged and an **Open statistics** action. This action opens a separate Exposure Statistics window with a monitor selector, the selected monitor's 12-by-8 heatmap, charged exposure summary, least/most exposed cells, imbalance information, reset, and CSV export.
+
+Settings and exposure history are saved automatically. The tray menu also provides quick access to the most common visibility, brightness, movement, opacity, positioning, and statistics actions.
+
+## Data and privacy
+
+Local application data is stored under:
+
+```text
+%LOCALAPPDATA%\AdaptiveOledClockCpp\
+```
+
+The directory contains:
+
+- `settings.conf` — versioned clock and movement settings.
+- `exposure.dat` — versioned per-monitor exposure history.
+- `app.log` — a low-volume local lifecycle, configuration, movement, and recovery log.
+
+The application does not transmit this data or make network requests. Writes use a temporary sibling file and replacement so an interrupted write can be recovered safely. Invalid existing data is quarantined before defaults are used.
+
+## Architecture for contributors
+
+The project separates platform-independent clock and placement logic from the Windows host:
+
+- `aoc_core` contains time formatting, settings validation and migration, geometry, monitor identity data, exposure maps and tracking, and candidate generation/scoring.
+- The Win32 host owns monitor and session integration, fullscreen detection, startup registration, hotkeys, tray menus, settings and statistics windows, persistence, logging, and application lifecycle.
+- The overlay is rendered with Direct2D and DirectWrite into a premultiplied bitmap and presented as a layered window with `UpdateLayeredWindow`.
+- Exposure coordinates are normalized to each monitor, while rendering and DPI-aware placement use physical pixels and device-independent units as appropriate.
+
+There are no third-party or web-runtime dependencies in the application architecture.
+
+## Limitations and safety disclaimer
+
+Adaptive OLED Clock is an exposure-balancing heuristic, not a burn-in prevention system or a guarantee of panel longevity. It does not model the physical aging characteristics of a particular OLED panel, measure per-pixel wear, or guarantee uniform exposure. The 12-by-8 history is intentionally coarse, and monitor identity can change when Windows reports a display differently.
+
+Use the application's settings together with the display manufacturer's care guidance and normal power-management practices. The software is provided for convenience and should not be treated as a substitute for those controls.
+
+## Contributing
+
+Keep changes focused on the native Windows application and preserve the separation between `aoc_core` and the Win32 host. For a change, describe the user-visible behavior, affected Windows events or settings, and any compatibility considerations. Build the x64 Release configuration before sharing the change.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full text.

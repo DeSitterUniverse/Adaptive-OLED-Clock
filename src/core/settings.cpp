@@ -31,12 +31,11 @@ std::string unescapeValue(std::string_view value) {
     for (std::size_t index = 0; index < value.size(); ++index) {
         if (value[index] == '%' && index + 2 < value.size()) {
             try {
-                const int decoded = std::stoi(std::string(value.substr(index + 1, 2)), nullptr, 16);
-                output.push_back(static_cast<char>(decoded));
+                output.push_back(static_cast<char>(std::stoi(std::string(value.substr(index + 1, 2)), nullptr, 16)));
                 index += 2;
                 continue;
             } catch (...) {
-                // Keep malformed escapes literal; validation will still protect the settings.
+                // Preserve malformed escapes so a recoverable file is never silently rewritten as empty text.
             }
         }
         output.push_back(value[index]);
@@ -46,9 +45,7 @@ std::string unescapeValue(std::string_view value) {
 
 std::string trim(std::string value) {
     const auto first = value.find_first_not_of(" \t");
-    if (first == std::string::npos) {
-        return {};
-    }
+    if (first == std::string::npos) return {};
     const auto last = value.find_last_not_of(" \t");
     return value.substr(first, last - first + 1);
 }
@@ -98,6 +95,16 @@ bool parseRect(std::string_view text, NormalizedRect& rect) {
     return rect.isValid();
 }
 
+bool parsePoint(std::string_view text, NormalizedPoint& point) {
+    std::stringstream stream{std::string(text)};
+    char comma = 0;
+    if (!(stream >> point.x >> comma >> point.y) || comma != ',' ||
+        !std::isfinite(point.x) || !std::isfinite(point.y)) {
+        return false;
+    }
+    return true;
+}
+
 std::string rectText(const NormalizedRect& rect) {
     std::ostringstream stream;
     stream << std::setprecision(17) << rect.left << ',' << rect.top << ',' << rect.right << ',' << rect.bottom;
@@ -135,22 +142,45 @@ std::map<std::string, std::string> parseProperties(const std::string& text, bool
     return properties;
 }
 
-template <typename T>
-void parseOptionalNumber(const std::map<std::string, std::string>& properties,
-                         const char* key,
-                         T& destination,
-                         bool& valid) {
+template <typename T, typename Parser>
+void readOptional(const std::map<std::string, std::string>& properties,
+                  const char* key,
+                  T& destination,
+                  bool& invalid,
+                  Parser parser) {
     const auto found = properties.find(key);
     if (found == properties.end()) return;
-    if constexpr (std::is_same_v<T, double>) {
-        double parsed = 0.0;
-        valid = valid && parseDouble(found->second, parsed);
-        if (valid) destination = parsed;
+    T parsed{};
+    if (parser(found->second, parsed)) {
+        destination = parsed;
     } else {
-        int parsed = 0;
-        valid = valid && parseInt(found->second, parsed);
-        if (valid) destination = static_cast<T>(parsed);
+        invalid = true;
     }
+}
+
+template <typename T>
+void readNumber(const std::map<std::string, std::string>& properties,
+                const char* key,
+                T& destination,
+                bool& invalid) {
+    readOptional<T>(properties, key, destination, invalid, [](std::string_view text, T& value) {
+        if constexpr (std::is_same_v<T, double>) {
+            return parseDouble(text, value);
+        } else {
+            int parsed = 0;
+            if (!parseInt(text, parsed)) return false;
+            value = static_cast<T>(parsed);
+            return true;
+        }
+    });
+}
+
+void readBool(const std::map<std::string, std::string>& properties,
+              const char* key,
+              bool& destination,
+              bool& invalid) {
+    readOptional<bool>(properties, key, destination, invalid,
+                       [](std::string_view text, bool& value) { return parseBool(text, value); });
 }
 
 } // namespace
@@ -160,17 +190,24 @@ Settings Settings::defaults() {
     settings.version = kCurrentSettingsVersion;
     settings.timeFormat = TimeFormat::Locale;
     settings.showAmPm = true;
+    settings.showSeconds = false;
+    settings.showDate = false;
+    settings.fontFamily = "Segoe UI";
+    settings.fontWeight = FontWeight::Normal;
     settings.fontSizeDip = 32.0;
     settings.textColor = {176, 176, 176, 255};
-    settings.opacity = 0.32;
+    settings.opacity = 0.45;
     settings.movementIntervalMinutes = 5;
-    settings.movementMode = MovementMode::WholeScreen;
+    settings.movementMode = MovementMode::EdgeOnly;
+    settings.microShiftEnabled = true;
+    settings.microShiftRadiusDip = 8.0;
     settings.allowedArea = {0.0, 0.0, 1.0, 1.0};
     settings.excludedAreas.clear();
     settings.edgeMarginDip = 24.0;
     settings.monitorMode = MonitorMode::FollowPrimary;
     settings.fixedMonitorKey.clear();
     settings.preferredPosition = {0.5, 0.5};
+    settings.preferredPositionEnabled = false;
     settings.hideInFullscreen = true;
     settings.launchAtStartup = false;
     settings.hotkeyEnabled = true;
@@ -182,10 +219,11 @@ Settings Settings::defaults() {
 
 Settings Settings::oledSafePreset() {
     Settings settings = defaults();
-    settings.opacity = 0.24;
+    settings.opacity = 0.31;
     settings.boostOpacity = 0.70;
     settings.boostDurationSeconds = 10;
     settings.movementIntervalMinutes = 5;
+    settings.microShiftRadiusDip = 6.0;
     settings.edgeMarginDip = 32.0;
     return settings;
 }
@@ -196,21 +234,27 @@ void Settings::validateAndNormalize() noexcept {
         static_cast<int>(timeFormat) > static_cast<int>(TimeFormat::TwentyFourHour)) {
         timeFormat = TimeFormat::Locale;
     }
+    if (static_cast<int>(fontWeight) < static_cast<int>(FontWeight::Normal) ||
+        static_cast<int>(fontWeight) > static_cast<int>(FontWeight::SemiBold)) {
+        fontWeight = FontWeight::Normal;
+    }
     if (static_cast<int>(movementMode) < static_cast<int>(MovementMode::WholeScreen) ||
-        static_cast<int>(movementMode) > static_cast<int>(MovementMode::LocalWander)) {
-        movementMode = MovementMode::WholeScreen;
+        static_cast<int>(movementMode) > static_cast<int>(MovementMode::EdgeOnly)) {
+        movementMode = MovementMode::EdgeOnly;
     }
     if (static_cast<int>(monitorMode) < static_cast<int>(MonitorMode::FollowPrimary) ||
         static_cast<int>(monitorMode) > static_cast<int>(MonitorMode::Fixed)) {
         monitorMode = MonitorMode::FollowPrimary;
     }
     if (!std::isfinite(fontSizeDip)) fontSizeDip = 32.0;
-    if (!std::isfinite(opacity)) opacity = 0.32;
+    if (!std::isfinite(opacity)) opacity = 0.45;
     if (!std::isfinite(boostOpacity)) boostOpacity = 0.85;
+    if (!std::isfinite(microShiftRadiusDip)) microShiftRadiusDip = 8.0;
     if (!std::isfinite(edgeMarginDip)) edgeMarginDip = 24.0;
     fontSizeDip = std::clamp(fontSizeDip, 8.0, 128.0);
     opacity = std::clamp(opacity, 0.0, 1.0);
     boostOpacity = std::clamp(boostOpacity, 0.0, 1.0);
+    microShiftRadiusDip = std::clamp(microShiftRadiusDip, 0.0, 64.0);
     edgeMarginDip = std::clamp(edgeMarginDip, 0.0, 500.0);
     movementIntervalMinutes = std::clamp(movementIntervalMinutes, 1, 120);
     boostDurationSeconds = std::clamp(boostDurationSeconds, 1, 300);
@@ -224,6 +268,8 @@ void Settings::validateAndNormalize() noexcept {
     excludedAreas = std::move(validExclusions);
     preferredPosition.x = clamp01(preferredPosition.x);
     preferredPosition.y = clamp01(preferredPosition.y);
+    if (fontFamily.empty()) fontFamily = "Segoe UI";
+    if (fontFamily.size() > 128) fontFamily.resize(128);
     if (fixedMonitorKey.size() > 512) fixedMonitorKey.resize(512);
 }
 
@@ -231,10 +277,14 @@ std::string serializeSettings(const Settings& input) {
     Settings settings = input;
     settings.validateAndNormalize();
     std::ostringstream output;
-    output << "# Adaptive OLED Clock C++ settings\n"
+    output << "# Adaptive OLED Clock settings\n"
            << "version=" << settings.version << '\n'
            << "timeFormat=" << static_cast<int>(settings.timeFormat) << '\n'
            << "showAmPm=" << (settings.showAmPm ? 1 : 0) << '\n'
+           << "showSeconds=" << (settings.showSeconds ? 1 : 0) << '\n'
+           << "showDate=" << (settings.showDate ? 1 : 0) << '\n'
+           << "fontFamily=" << escapeValue(settings.fontFamily) << '\n'
+           << "fontWeight=" << static_cast<int>(settings.fontWeight) << '\n'
            << std::setprecision(17)
            << "fontSizeDip=" << settings.fontSizeDip << '\n'
            << "textColor=" << static_cast<int>(settings.textColor.r) << ','
@@ -243,6 +293,8 @@ std::string serializeSettings(const Settings& input) {
            << "opacity=" << settings.opacity << '\n'
            << "movementIntervalMinutes=" << settings.movementIntervalMinutes << '\n'
            << "movementMode=" << static_cast<int>(settings.movementMode) << '\n'
+           << "microShiftEnabled=" << (settings.microShiftEnabled ? 1 : 0) << '\n'
+           << "microShiftRadiusDip=" << settings.microShiftRadiusDip << '\n'
            << "allowedArea=" << rectText(settings.allowedArea) << '\n'
            << "excludedAreas=";
     for (std::size_t index = 0; index < settings.excludedAreas.size(); ++index) {
@@ -254,6 +306,7 @@ std::string serializeSettings(const Settings& input) {
            << "monitorMode=" << static_cast<int>(settings.monitorMode) << '\n'
            << "fixedMonitorKey=" << escapeValue(settings.fixedMonitorKey) << '\n'
            << "preferredPosition=" << settings.preferredPosition.x << ',' << settings.preferredPosition.y << '\n'
+           << "preferredPositionEnabled=" << (settings.preferredPositionEnabled ? 1 : 0) << '\n'
            << "hideInFullscreen=" << (settings.hideInFullscreen ? 1 : 0) << '\n'
            << "launchAtStartup=" << (settings.launchAtStartup ? 1 : 0) << '\n'
            << "hotkeyEnabled=" << (settings.hotkeyEnabled ? 1 : 0) << '\n'
@@ -275,85 +328,95 @@ SettingsLoadResult deserializeSettings(const std::string& text) {
     }
 
     int version = 0;
-    const auto versionFound = properties.find("version");
-    if (versionFound != properties.end() && !parseInt(versionFound->second, version)) {
-        result.recovered = true;
-        result.error = "settings version was invalid";
-        return result;
-    }
-    if (version > kCurrentSettingsVersion) {
-        result.recovered = true;
-        result.error = "settings version was newer than this build";
-        return result;
-    }
-    if (version < 0) {
-        result.recovered = true;
-        result.error = "settings version was negative";
-        return result;
-    }
-    if (version == 0) result.recovered = true;
-    if (!syntaxOk) {
-        result.recovered = true;
-        result.error = "settings contained malformed lines";
-        return result;
-    }
-
-    Settings& settings = result.value;
-    bool valid = true;
-    int integer = 0;
-    if (const auto found = properties.find("timeFormat"); found != properties.end()) {
-        valid = parseInt(found->second, integer);
-        if (valid) settings.timeFormat = static_cast<TimeFormat>(integer);
-    }
-    if (const auto found = properties.find("showAmPm"); found != properties.end()) valid = parseBool(found->second, settings.showAmPm) && valid;
-    parseOptionalNumber(properties, "fontSizeDip", settings.fontSizeDip, valid);
-    if (version == 0) parseOptionalNumber(properties, "fontSize", settings.fontSizeDip, valid);
-    if (const auto found = properties.find("textColor"); found != properties.end()) valid = parseColor(found->second, settings.textColor) && valid;
-    parseOptionalNumber(properties, "opacity", settings.opacity, valid);
-    parseOptionalNumber(properties, "movementIntervalMinutes", settings.movementIntervalMinutes, valid);
-    if (const auto found = properties.find("movementMode"); found != properties.end()) {
-        valid = parseInt(found->second, integer) && valid;
-        if (valid) settings.movementMode = static_cast<MovementMode>(integer);
-    }
-    if (const auto found = properties.find("allowedArea"); found != properties.end()) valid = parseRect(found->second, settings.allowedArea) && valid;
-    if (const auto found = properties.find("excludedAreas"); found != properties.end() && !found->second.empty()) {
-        settings.excludedAreas.clear();
-        std::stringstream exclusions(found->second);
-        std::string item;
-        while (std::getline(exclusions, item, ';')) {
-            NormalizedRect rect;
-            if (!parseRect(item, rect)) {
-                valid = false;
-                break;
-            }
-            settings.excludedAreas.push_back(rect);
+    if (const auto found = properties.find("version"); found != properties.end()) {
+        if (!parseInt(found->second, version)) {
+            result.recovered = true;
+            result.error = "settings version was invalid";
+            return result;
         }
     }
-    parseOptionalNumber(properties, "edgeMarginDip", settings.edgeMarginDip, valid);
-    if (const auto found = properties.find("monitorMode"); found != properties.end()) {
-        valid = parseInt(found->second, integer) && valid;
-        if (valid) settings.monitorMode = static_cast<MonitorMode>(integer);
-    }
-    if (const auto found = properties.find("fixedMonitorKey"); found != properties.end()) settings.fixedMonitorKey = unescapeValue(found->second);
-    if (const auto found = properties.find("preferredPosition"); found != properties.end()) {
-        std::stringstream stream(found->second);
-        char comma = 0;
-        valid = static_cast<bool>(stream >> settings.preferredPosition.x >> comma >> settings.preferredPosition.y) && comma == ',' && valid;
-    }
-    if (const auto found = properties.find("hideInFullscreen"); found != properties.end()) valid = parseBool(found->second, settings.hideInFullscreen) && valid;
-    if (const auto found = properties.find("launchAtStartup"); found != properties.end()) valid = parseBool(found->second, settings.launchAtStartup) && valid;
-    if (const auto found = properties.find("hotkeyEnabled"); found != properties.end()) valid = parseBool(found->second, settings.hotkeyEnabled) && valid;
-    if (const auto found = properties.find("clockVisible"); found != properties.end()) valid = parseBool(found->second, settings.clockVisible) && valid;
-    parseOptionalNumber(properties, "boostOpacity", settings.boostOpacity, valid);
-    parseOptionalNumber(properties, "boostDurationSeconds", settings.boostDurationSeconds, valid);
-
-    if (!valid) {
-        result.value = Settings::defaults();
+    if (version > kCurrentSettingsVersion || version < 0) {
         result.recovered = true;
-        result.error = "settings contained an invalid value";
+        result.error = "settings version was unsupported";
         return result;
     }
+    result.migrated = version < kCurrentSettingsVersion;
+    result.recovered = result.recovered || result.migrated || !syntaxOk;
+    bool invalid = !syntaxOk;
+    Settings& settings = result.value;
+    int integer = 0;
+
+    if (const auto found = properties.find("timeFormat"); found != properties.end()) {
+        if (parseInt(found->second, integer)) settings.timeFormat = static_cast<TimeFormat>(integer);
+        else invalid = true;
+    }
+    readBool(properties, "showAmPm", settings.showAmPm, invalid);
+    readBool(properties, "showSeconds", settings.showSeconds, invalid);
+    readBool(properties, "showDate", settings.showDate, invalid);
+    if (const auto found = properties.find("fontFamily"); found != properties.end()) {
+        settings.fontFamily = unescapeValue(found->second);
+    }
+    if (const auto found = properties.find("fontWeight"); found != properties.end()) {
+        if (parseInt(found->second, integer)) settings.fontWeight = static_cast<FontWeight>(integer);
+        else invalid = true;
+    }
+    readNumber(properties, "fontSizeDip", settings.fontSizeDip, invalid);
+    if (version == 0) readNumber(properties, "fontSize", settings.fontSizeDip, invalid);
+    if (const auto found = properties.find("textColor"); found != properties.end()) {
+        if (!parseColor(found->second, settings.textColor)) invalid = true;
+    }
+    readNumber(properties, "opacity", settings.opacity, invalid);
+    readNumber(properties, "movementIntervalMinutes", settings.movementIntervalMinutes, invalid);
+    if (const auto found = properties.find("movementMode"); found != properties.end()) {
+        if (parseInt(found->second, integer)) settings.movementMode = static_cast<MovementMode>(integer);
+        else invalid = true;
+    }
+    readBool(properties, "microShiftEnabled", settings.microShiftEnabled, invalid);
+    readNumber(properties, "microShiftRadiusDip", settings.microShiftRadiusDip, invalid);
+    if (const auto found = properties.find("allowedArea"); found != properties.end()) {
+        if (!parseRect(found->second, settings.allowedArea)) invalid = true;
+    }
+    if (const auto found = properties.find("excludedAreas"); found != properties.end()) {
+        settings.excludedAreas.clear();
+        if (!found->second.empty()) {
+            std::stringstream exclusions(found->second);
+            std::string item;
+            while (std::getline(exclusions, item, ';')) {
+                NormalizedRect rect;
+                if (!parseRect(item, rect)) {
+                    invalid = true;
+                    break;
+                }
+                settings.excludedAreas.push_back(rect);
+            }
+        }
+    }
+    readNumber(properties, "edgeMarginDip", settings.edgeMarginDip, invalid);
+    if (const auto found = properties.find("monitorMode"); found != properties.end()) {
+        if (parseInt(found->second, integer)) settings.monitorMode = static_cast<MonitorMode>(integer);
+        else invalid = true;
+    }
+    if (const auto found = properties.find("fixedMonitorKey"); found != properties.end()) {
+        settings.fixedMonitorKey = unescapeValue(found->second);
+    }
+    if (const auto found = properties.find("preferredPosition"); found != properties.end()) {
+        if (!parsePoint(found->second, settings.preferredPosition)) invalid = true;
+    }
+    readBool(properties, "preferredPositionEnabled", settings.preferredPositionEnabled, invalid);
+    readBool(properties, "hideInFullscreen", settings.hideInFullscreen, invalid);
+    readBool(properties, "launchAtStartup", settings.launchAtStartup, invalid);
+    readBool(properties, "hotkeyEnabled", settings.hotkeyEnabled, invalid);
+    readBool(properties, "clockVisible", settings.clockVisible, invalid);
+    readNumber(properties, "boostOpacity", settings.boostOpacity, invalid);
+    readNumber(properties, "boostDurationSeconds", settings.boostDurationSeconds, invalid);
+
     settings.validateAndNormalize();
+    if (invalid) {
+        result.recovered = true;
+        result.error = "settings contained invalid values; valid values were retained";
+    } else if (result.migrated) {
+        result.error = "settings migrated to the current schema";
+    }
     return result;
 }
 

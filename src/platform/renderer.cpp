@@ -56,32 +56,66 @@ bool LayeredRenderer::ensureSurface(SIZE pixelSize) {
 }
 
 bool LayeredRenderer::renderText(const std::wstring& text,
+                                 const std::wstring& fontFamily,
+                                 core::FontWeight fontWeight,
                                  double fontSizeDip,
                                  core::Color color,
                                  double opacity,
                                  std::uint32_t dpi,
-                                 core::SizeD& measuredDip) {
+                                 bool positioning,
+                                 core::SizeD& measuredTextDip,
+                                 core::SizeD& measuredSurfaceDip) {
     if (!initialize() || text.empty()) return false;
     const float safeFontSize = static_cast<float>(std::clamp(fontSizeDip, 8.0, 128.0));
-    HRESULT result = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                                     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                                     safeFontSize, L"", textFormat_.ReleaseAndGetAddressOf());
+    const DWRITE_FONT_WEIGHT weight = fontWeight == core::FontWeight::SemiBold
+                                          ? DWRITE_FONT_WEIGHT_SEMI_BOLD
+                                          : DWRITE_FONT_WEIGHT_NORMAL;
+    const wchar_t* family = fontFamily.empty() ? L"Segoe UI" : fontFamily.c_str();
+    HRESULT result = writeFactory_->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+                                                     DWRITE_FONT_STRETCH_NORMAL, safeFontSize, L"",
+                                                     textFormat_.ReleaseAndGetAddressOf());
     if (FAILED(result)) return false;
     textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
 
-    ComPtr<IDWriteTextLayout> layout;
+    ComPtr<IDWriteTextLayout> clockLayout;
     result = writeFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), textFormat_.Get(),
-                                             4096.0f, 4096.0f, layout.GetAddressOf());
+                                             4096.0f, 4096.0f, clockLayout.GetAddressOf());
     if (FAILED(result)) return false;
-    DWRITE_TEXT_METRICS metrics{};
-    result = layout->GetMetrics(&metrics);
+    DWRITE_TEXT_METRICS clockMetrics{};
+    result = clockLayout->GetMetrics(&clockMetrics);
     if (FAILED(result)) return false;
-    measuredDip = {std::max(1.0, static_cast<double>(metrics.widthIncludingTrailingWhitespace) + 2.0),
-                   std::max(1.0, static_cast<double>(metrics.height) + 2.0)};
-    const SIZE pixelSize{static_cast<LONG>(std::ceil(measuredDip.width * dpi / 96.0)),
-                         static_cast<LONG>(std::ceil(measuredDip.height * dpi / 96.0))};
+    measuredTextDip = {std::max(1.0, static_cast<double>(clockMetrics.widthIncludingTrailingWhitespace) + 2.0),
+                       std::max(1.0, static_cast<double>(clockMetrics.height) + 2.0)};
+
+    constexpr double paddingDip = 16.0;
+    double contentWidth = measuredTextDip.width;
+    double contentHeight = measuredTextDip.height;
+    ComPtr<IDWriteTextLayout> instructionLayout;
+    if (positioning) {
+        result = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f,
+                                                 L"", instructionFormat_.ReleaseAndGetAddressOf());
+        if (FAILED(result)) return false;
+        instructionFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        constexpr wchar_t instruction[] = L"Drag anywhere  /  Esc to finish";
+        result = writeFactory_->CreateTextLayout(instruction,
+                                                 static_cast<UINT32>(std::size(instruction) - 1),
+                                                 instructionFormat_.Get(),
+                                                 static_cast<float>(measuredTextDip.width), 4096.0f,
+                                                 instructionLayout.GetAddressOf());
+        if (FAILED(result)) return false;
+        DWRITE_TEXT_METRICS instructionMetrics{};
+        result = instructionLayout->GetMetrics(&instructionMetrics);
+        if (FAILED(result)) return false;
+        contentWidth = std::max(contentWidth, static_cast<double>(instructionMetrics.widthIncludingTrailingWhitespace));
+        contentHeight += static_cast<double>(instructionMetrics.height) + 5.0;
+    }
+    const double surfacePadding = positioning ? paddingDip : 0.0;
+    measuredSurfaceDip = {contentWidth + 2.0 * surfacePadding, contentHeight + 2.0 * surfacePadding};
+    const SIZE pixelSize{static_cast<LONG>(std::ceil(measuredSurfaceDip.width * dpi / 96.0)),
+                         static_cast<LONG>(std::ceil(measuredSurfaceDip.height * dpi / 96.0))};
     if (!ensureSurface(pixelSize)) return false;
     RECT renderRect{0, 0, pixelSize.cx, pixelSize.cy};
     result = dcRenderTarget_->BindDC(memoryDc_, &renderRect);
@@ -89,15 +123,42 @@ bool LayeredRenderer::renderText(const std::wstring& text,
     dcRenderTarget_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
     dcRenderTarget_->BeginDraw();
     dcRenderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-    ComPtr<ID2D1SolidColorBrush> brush;
-    const float alpha = static_cast<float>(std::clamp(opacity, 0.0, 1.0) * color.a / 255.0);
+
+    const float textAlpha = static_cast<float>(std::clamp(opacity, 0.0, 1.0) * color.a / 255.0);
+    ComPtr<ID2D1SolidColorBrush> textBrush;
     result = dcRenderTarget_->CreateSolidColorBrush(
-        D2D1::ColorF(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, alpha), brush.GetAddressOf());
-    if (SUCCEEDED(result)) {
-        dcRenderTarget_->DrawTextLayout(D2D1::Point2F(1.0f, 1.0f), layout.Get(), brush.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        D2D1::ColorF(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, textAlpha), textBrush.GetAddressOf());
+    HRESULT drawResult = result;
+    if (SUCCEEDED(drawResult) && positioning) {
+        ComPtr<ID2D1SolidColorBrush> cardBrush;
+        ComPtr<ID2D1SolidColorBrush> borderBrush;
+        drawResult = dcRenderTarget_->CreateSolidColorBrush(D2D1::ColorF(0.16f, 0.18f, 0.21f, 0.14f),
+                                                            cardBrush.GetAddressOf());
+        if (SUCCEEDED(drawResult)) {
+            drawResult = dcRenderTarget_->CreateSolidColorBrush(D2D1::ColorF(0.65f, 0.72f, 0.80f, 0.42f),
+                                                                borderBrush.GetAddressOf());
+        }
+        const D2D1_RECT_F card{0.5f, 0.5f, static_cast<float>(measuredSurfaceDip.width - 0.5),
+                               static_cast<float>(measuredSurfaceDip.height - 0.5)};
+        if (SUCCEEDED(drawResult)) dcRenderTarget_->FillRectangle(card, cardBrush.Get());
+        if (SUCCEEDED(drawResult)) dcRenderTarget_->DrawRectangle(card, borderBrush.Get(), 1.0f);
     }
-    const HRESULT drawResult = dcRenderTarget_->EndDraw();
-    return SUCCEEDED(result) && SUCCEEDED(drawResult);
+    const D2D1_POINT_2F textOrigin{static_cast<float>(surfacePadding + 1.0), static_cast<float>(surfacePadding + 1.0)};
+    if (SUCCEEDED(drawResult)) dcRenderTarget_->DrawTextLayout(textOrigin, clockLayout.Get(), textBrush.Get(),
+                                                               D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    if (SUCCEEDED(drawResult) && positioning) {
+        ComPtr<ID2D1SolidColorBrush> instructionBrush;
+        drawResult = dcRenderTarget_->CreateSolidColorBrush(D2D1::ColorF(0.78f, 0.82f, 0.88f, 0.62f),
+                                                            instructionBrush.GetAddressOf());
+        if (SUCCEEDED(drawResult)) {
+            dcRenderTarget_->DrawTextLayout({static_cast<float>(surfacePadding + 1.0),
+                                             static_cast<float>(surfacePadding + measuredTextDip.height + 2.0)},
+                                            instructionLayout.Get(), instructionBrush.Get(),
+                                            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        }
+    }
+    const HRESULT endResult = dcRenderTarget_->EndDraw();
+    return SUCCEEDED(result) && SUCCEEDED(drawResult) && SUCCEEDED(endResult);
 }
 
 bool LayeredRenderer::present(HWND window, POINT screenPosition) {
@@ -125,6 +186,7 @@ void LayeredRenderer::reset() {
     bits_ = nullptr;
     pixelSize_ = {};
     textFormat_.Reset();
+    instructionFormat_.Reset();
     dcRenderTarget_.Reset();
     writeFactory_.Reset();
     d2dFactory_.Reset();

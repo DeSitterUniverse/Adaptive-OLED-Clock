@@ -21,11 +21,15 @@ public:
 
     [[nodiscard]] bool initialize();
     [[nodiscard]] bool renderText(const std::wstring& text,
+                                  const std::wstring& fontFamily,
+                                  core::FontWeight fontWeight,
                                   double fontSizeDip,
                                   core::Color color,
                                   double opacity,
                                   std::uint32_t dpi,
-                                  core::SizeD& measuredDip);
+                                  bool positioning,
+                                  core::SizeD& measuredTextDip,
+                                  core::SizeD& measuredSurfaceDip);
     [[nodiscard]] bool present(HWND window, POINT screenPosition);
     void reset();
 
@@ -36,6 +40,7 @@ private:
     Microsoft::WRL::ComPtr<IDWriteFactory> writeFactory_;
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dcRenderTarget_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormat_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> instructionFormat_;
     HDC memoryDc_{nullptr};
     HBITMAP bitmap_{nullptr};
     HBITMAP oldBitmap_{nullptr};

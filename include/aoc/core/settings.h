@@ -7,23 +7,30 @@
 
 namespace aoc::core {
 
-constexpr int kCurrentSettingsVersion = 1;
+constexpr int kCurrentSettingsVersion = 2;
 
 struct Settings {
     int version{kCurrentSettingsVersion};
     TimeFormat timeFormat{TimeFormat::Locale};
     bool showAmPm{true};
+    bool showSeconds{false};
+    bool showDate{false};
+    std::string fontFamily{"Segoe UI"};
+    FontWeight fontWeight{FontWeight::Normal};
     double fontSizeDip{32.0};
     Color textColor{176, 176, 176, 255};
-    double opacity{0.32};
+    double opacity{0.45};
     int movementIntervalMinutes{5};
-    MovementMode movementMode{MovementMode::WholeScreen};
+    MovementMode movementMode{MovementMode::EdgeOnly};
+    bool microShiftEnabled{true};
+    double microShiftRadiusDip{8.0};
     NormalizedRect allowedArea{};
     std::vector<NormalizedRect> excludedAreas;
     double edgeMarginDip{24.0};
     MonitorMode monitorMode{MonitorMode::FollowPrimary};
     std::string fixedMonitorKey;
     NormalizedPoint preferredPosition{0.5, 0.5};
+    bool preferredPositionEnabled{false};
     bool hideInFullscreen{true};
     bool launchAtStartup{false};
     bool hotkeyEnabled{true};
@@ -39,6 +46,7 @@ struct Settings {
 struct SettingsLoadResult {
     Settings value{};
     bool recovered{false};
+    bool migrated{false};
     std::string error;
 };
 

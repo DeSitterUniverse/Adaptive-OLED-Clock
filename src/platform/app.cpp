@@ -9,6 +9,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <powerbase.h>
 #include <shellapi.h>
 #include <winnls.h>
@@ -16,34 +17,42 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <random>
 #include <sstream>
 
 namespace aoc::platform {
 namespace {
 
 constexpr wchar_t kControllerClass[] = L"AdaptiveOledClockControllerWindow";
+constexpr wchar_t kSingleInstanceName[] = L"Local\\AdaptiveOledClockCppSingleInstance";
 constexpr int kHotkeyId = 1;
 constexpr int kPositioningEscapeHotkeyId = 2;
-constexpr UINT_PTR kMinuteTimer = 1;
+constexpr UINT_PTR kDisplayTimer = 1;
 constexpr UINT_PTR kMajorMoveTimer = 2;
 constexpr UINT_PTR kExposureCheckpointTimer = 3;
 constexpr UINT_PTR kBoostTimer = 4;
+constexpr UINT_PTR kMicroTimer = 5;
 constexpr UINT kWinEventMessage = WM_APP + 2;
 constexpr UINT kDpiMessage = WM_APP + 3;
+constexpr UINT kShowSettingsMessage = WM_APP + 4;
+constexpr double kPositioningPaddingDip = 16.0;
 
 constexpr UINT kTrayToggle = 4000;
 constexpr UINT kTrayBrightness = 4001;
-constexpr UINT kTrayModeWhole = 4002;
-constexpr UINT kTrayModeLocal = 4003;
-constexpr UINT kTrayOpacity16 = 4004;
-constexpr UINT kTrayOpacity24 = 4005;
-constexpr UINT kTrayOpacity32 = 4006;
-constexpr UINT kTrayOpacity45 = 4007;
-constexpr UINT kTraySettings = 4008;
-constexpr UINT kTrayStatistics = 4009;
-constexpr UINT kTrayPosition = 4010;
-constexpr UINT kTrayExit = 4011;
+constexpr UINT kTrayModeEdge = 4002;
+constexpr UINT kTrayModeWhole = 4003;
+constexpr UINT kTrayModeLocal = 4004;
+constexpr UINT kTrayOpacity16 = 4005;
+constexpr UINT kTrayOpacity24 = 4006;
+constexpr UINT kTrayOpacity32 = 4007;
+constexpr UINT kTrayOpacity45 = 4008;
+constexpr UINT kTraySettings = 4009;
+constexpr UINT kTrayStatistics = 4010;
+constexpr UINT kTrayPosition = 4011;
+constexpr UINT kTrayExit = 4012;
 
 App* g_eventApp = nullptr;
 
@@ -54,18 +63,37 @@ std::wstring modulePath() {
     return path;
 }
 
-bool nearlyEqual(double first, double second) {
-    return std::abs(first - second) < 0.01;
+std::wstring fromUtf8(const std::string& value) {
+    if (value.empty()) return {};
+    const int required = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (required <= 0) return {};
+    std::wstring result(static_cast<std::size_t>(required), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), required);
+    return result;
 }
+
+std::string csvQuote(const std::string& value) {
+    std::string result = "\"";
+    for (const char character : value) {
+        if (character == '"') result += "\"\"";
+        else result += character;
+    }
+    result += '"';
+    return result;
+}
+
+bool nearlyEqual(double first, double second) { return std::abs(first - second) < 0.01; }
 
 } // namespace
 
-App::App(HINSTANCE instance, int showCommand)
+App::App(HINSTANCE instance, int showCommand, bool openSettingsOnStart)
     : instance_(instance),
       showCommand_(showCommand),
+      openSettingsOnStart_(openSettingsOnStart),
       paths_(resolveDataPaths()),
       logger_(paths_.logFile),
       settings_(core::Settings::defaults()),
+      committedSettings_(settings_),
       exposureTracker_(exposure_) {}
 
 App::~App() { shutdown(); }
@@ -73,10 +101,18 @@ App::~App() { shutdown(); }
 int App::run() {
     if (!initialize()) {
         shutdown();
-        return 1;
+        return anotherInstance_ ? 0 : 1;
     }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // Settings and statistics are modeless top-level windows, not dialog
+        // resources. IsDialogMessageW supplies Tab/Shift+Tab and default-button
+        // navigation without intercepting controller, tray, or overlay messages.
+        const auto routeDialogMessage = [&message](HWND dialog) {
+            return dialog && IsWindowVisible(dialog) != FALSE &&
+                   IsDialogMessageW(dialog, &message) != FALSE;
+        };
+        if (routeDialogMessage(settingsWindow_.hwnd()) || routeDialogMessage(statisticsWindow_.hwnd())) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -87,19 +123,38 @@ int App::run() {
 bool App::initialize() {
     if (initialized_) return true;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    singletonMutex_ = CreateMutexW(nullptr, FALSE, kSingleInstanceName);
+    if (!singletonMutex_) {
+        logger_.error(L"Could not create the single-instance guard");
+        return false;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // A second launch only asks the existing controller to reveal settings; it never loads or writes shared state.
+        const HWND existing = FindWindowExW(HWND_MESSAGE, nullptr, kControllerClass, nullptr);
+        if (existing) PostMessageW(existing, kShowSettingsMessage, 0, 0);
+        anotherInstance_ = true;
+        CloseHandle(singletonMutex_);
+        singletonMutex_ = nullptr;
+        return false;
+    }
+    taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     comInitialized_ = SUCCEEDED(comResult);
-    INITCOMMONCONTROLSEX commonControls{sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
+    INITCOMMONCONTROLSEX commonControls{sizeof(INITCOMMONCONTROLSEX),
+                                       ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES};
     InitCommonControlsEx(&commonControls);
     createControllerWindow();
     if (!controller_) return false;
 
     const LoadedData loaded = loadData(paths_);
     settings_ = loaded.settings;
+    committedSettings_ = settings_;
     exposure_ = loaded.exposure;
     clockVisible_ = settings_.clockVisible;
-    if (loaded.settingsRecovered) logger_.warning(L"Settings recovery/defaults were used");
+    if (loaded.settingsRecovered) logger_.warning(L"Settings recovery or migration was used");
     if (loaded.exposureRecovered) logger_.warning(L"Exposure recovery/defaults were used");
+    if (loaded.settingsMigrated) persistSettings();
 
     wchar_t pattern[128]{};
     if (GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_STIMEFORMAT, pattern,
@@ -119,38 +174,53 @@ bool App::initialize() {
         return false;
     }
     if (!settingsWindow_.create(instance_, controller_,
-                                [this](const core::Settings& settings) { applySettings(settings); },
+                                [this](const core::Settings& settings, bool committed) { applySettings(settings, committed); },
                                 [this]() {
-                                    applySettings(core::Settings::defaults());
+                                    applySettings(core::Settings::defaults(), true);
                                     settingsWindow_.show(settings_, monitors_);
                                 },
                                 [this]() {
-                                    applySettings(core::Settings::oledSafePreset());
+                                    applySettings(core::Settings::oledSafePreset(), true);
                                     settingsWindow_.show(settings_, monitors_);
                                 },
-                                [this]() { beginPositioningMode(); })) {
+                                [this]() { beginPositioningMode(); },
+                                [this]() { showStatisticsWindow(); })) {
         logger_.error(L"Settings window creation failed");
         return false;
     }
+    if (!statisticsWindow_.create(instance_, controller_,
+                                  [this]() { resetExposureHistory(); },
+                                  [this]() { exportExposureCsv(); })) {
+        logger_.error(L"Statistics window creation failed");
+        return false;
+    }
 
-    core::SizeD initialSize{};
-    if (!renderer_.renderText(currentTimeText(), settings_.fontSizeDip, settings_.textColor,
-                              currentOpacity(), 96, initialSize)) {
+    core::SizeD initialText{};
+    core::SizeD initialSurface{};
+    if (!renderer_.renderText(currentTimeText(), fromUtf8(settings_.fontFamily), settings_.fontWeight,
+                              settings_.fontSizeDip, settings_.textColor, currentOpacity(), 96, false,
+                              initialText, initialSurface)) {
         logger_.error(L"Initial clock text rendering failed");
         return false;
     }
-    renderedSizeDip_ = initialSize.width > 0.0 ? initialSize : core::SizeD{80.0, 32.0};
+    renderedSizeDip_ = initialText.width > 0.0 ? initialText : core::SizeD{80.0, 32.0};
+    renderedSurfaceDip_ = initialSurface.width > 0.0 ? initialSurface : renderedSizeDip_;
     refreshMonitorsAndPlacement(false);
     initializeSystemIntegrations();
     createTrayIcon();
     setStartupRegistration();
-    scheduleMinuteBoundary();
+    scheduleTimeBoundary();
+    scheduleMicroBoundary();
     scheduleMajorMove();
     SetTimer(controller_, kExposureCheckpointTimer, 60'000, nullptr);
     refreshFullscreenState();
     renderAndPresent();
     initialized_ = true;
     logger_.info(L"Adaptive OLED Clock started");
+    if (openSettingsOnStart_) {
+        settingsWindow_.show(settings_, monitors_);
+        openSettingsOnStart_ = false;
+    }
     return true;
 }
 
@@ -164,7 +234,9 @@ void App::shutdown() {
         persistSettings();
         unregisterSystemIntegrations();
         removeTrayIcon();
+        statisticsWindow_.hide();
         settingsWindow_.hide();
+        overlay_.setInteractive(false);
         overlay_.hide();
         overlay_.destroy();
         if (controller_) DestroyWindow(controller_);
@@ -173,6 +245,10 @@ void App::shutdown() {
     if (comInitialized_) {
         CoUninitialize();
         comInitialized_ = false;
+    }
+    if (singletonMutex_) {
+        CloseHandle(singletonMutex_);
+        singletonMutex_ = nullptr;
     }
     g_eventApp = nullptr;
     initialized_ = false;
@@ -186,7 +262,7 @@ void App::createControllerWindow() {
     RegisterClassExW(&windowClass);
     controller_ = CreateWindowExW(0, kControllerClass, L"Adaptive OLED Clock Controller",
                                   0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance_, this);
-    g_eventApp = this;
+    if (controller_) g_eventApp = this;
 }
 
 void App::initializeSystemIntegrations() {
@@ -212,14 +288,16 @@ void App::initializeSystemIntegrations() {
 }
 
 void App::unregisterSystemIntegrations() {
-    KillTimer(controller_, kMinuteTimer);
-    KillTimer(controller_, kMajorMoveTimer);
-    KillTimer(controller_, kExposureCheckpointTimer);
-    KillTimer(controller_, kBoostTimer);
-    if (controller_) UnregisterHotKey(controller_, kHotkeyId);
-    if (controller_) UnregisterHotKey(controller_, kPositioningEscapeHotkeyId);
-    if (sessionNotificationId_ || controller_) WTSUnRegisterSessionNotification(controller_);
-    sessionNotificationId_ = 0;
+    if (controller_) {
+        KillTimer(controller_, kDisplayTimer);
+        KillTimer(controller_, kMajorMoveTimer);
+        KillTimer(controller_, kExposureCheckpointTimer);
+        KillTimer(controller_, kBoostTimer);
+        KillTimer(controller_, kMicroTimer);
+        UnregisterHotKey(controller_, kHotkeyId);
+        UnregisterHotKey(controller_, kPositioningEscapeHotkeyId);
+        WTSUnRegisterSessionNotification(controller_);
+    }
     if (consoleDisplayPower_) UnregisterPowerSettingNotification(consoleDisplayPower_);
     if (monitorPower_) UnregisterPowerSettingNotification(monitorPower_);
     consoleDisplayPower_ = nullptr;
@@ -240,7 +318,13 @@ void App::createTrayIcon() {
     trayIcon_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wcscpy_s(trayIcon_.szTip, L"Adaptive OLED Clock");
     trayCreated_ = Shell_NotifyIconW(NIM_ADD, &trayIcon_) != FALSE;
-    if (trayCreated_) Shell_NotifyIconW(NIM_SETVERSION, &trayIcon_);
+    if (trayCreated_) {
+        Shell_NotifyIconW(NIM_SETVERSION, &trayIcon_);
+        trayFailureLogged_ = false;
+    } else if (!trayFailureLogged_) {
+        logger_.warning(L"Could not create the tray icon; the application will continue without it");
+        trayFailureLogged_ = true;
+    }
 }
 
 void App::removeTrayIcon() {
@@ -254,16 +338,18 @@ void App::showTrayMenu(POINT screenPoint) {
     AppendMenuW(menu, MF_STRING, kTrayToggle, clockVisible_ ? L"Hide Clock" : L"Show Clock");
     AppendMenuW(menu, MF_STRING, kTrayBrightness, L"Temporary Brightness");
     HMENU movement = CreatePopupMenu();
+    AppendMenuW(movement, MF_STRING | (settings_.movementMode == core::MovementMode::EdgeOnly ? MF_CHECKED : 0),
+                kTrayModeEdge, L"Edge-only (recommended)");
     AppendMenuW(movement, MF_STRING | (settings_.movementMode == core::MovementMode::WholeScreen ? MF_CHECKED : 0),
                 kTrayModeWhole, L"Whole screen");
     AppendMenuW(movement, MF_STRING | (settings_.movementMode == core::MovementMode::LocalWander ? MF_CHECKED : 0),
                 kTrayModeLocal, L"Local wander");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(movement), L"Movement Mode");
     HMENU opacity = CreatePopupMenu();
-    AppendMenuW(opacity, MF_STRING, kTrayOpacity16, L"16% normal opacity");
-    AppendMenuW(opacity, MF_STRING, kTrayOpacity24, L"24% normal opacity");
+    AppendMenuW(opacity, MF_STRING | (nearlyEqual(settings_.opacity, 0.16) ? MF_CHECKED : 0), kTrayOpacity16, L"16% normal opacity");
+    AppendMenuW(opacity, MF_STRING | (nearlyEqual(settings_.opacity, 0.24) ? MF_CHECKED : 0), kTrayOpacity24, L"24% normal opacity");
     AppendMenuW(opacity, MF_STRING | (nearlyEqual(settings_.opacity, 0.32) ? MF_CHECKED : 0), kTrayOpacity32, L"32% normal opacity");
-    AppendMenuW(opacity, MF_STRING, kTrayOpacity45, L"45% normal opacity");
+    AppendMenuW(opacity, MF_STRING | (nearlyEqual(settings_.opacity, 0.45) ? MF_CHECKED : 0), kTrayOpacity45, L"45% normal opacity");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(opacity), L"Clock Opacity");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTraySettings, L"Settings");
@@ -281,72 +367,101 @@ void App::showTrayMenu(POINT screenPoint) {
 
 void App::handleTrayCommand(UINT command) {
     switch (command) {
-    case kTrayToggle:
-        toggleClock();
-        break;
-    case kTrayBrightness:
-        triggerBrightnessBoost();
-        break;
-    case kTrayModeWhole:
-        settings_.movementMode = core::MovementMode::WholeScreen;
-        applySettings(settings_);
-        break;
-    case kTrayModeLocal:
-        settings_.movementMode = core::MovementMode::LocalWander;
-        applySettings(settings_);
-        break;
-    case kTrayOpacity16:
-        settings_.opacity = 0.16;
-        applySettings(settings_);
-        break;
-    case kTrayOpacity24:
-        settings_.opacity = 0.24;
-        applySettings(settings_);
-        break;
-    case kTrayOpacity32:
-        settings_.opacity = 0.32;
-        applySettings(settings_);
-        break;
-    case kTrayOpacity45:
-        settings_.opacity = 0.45;
-        applySettings(settings_);
-        break;
-    case kTraySettings:
-        settingsWindow_.show(settings_, monitors_);
-        break;
-    case kTrayStatistics: {
-        const core::ExposureMap* map = selectedMonitor_ ? exposure_.find(selectedMonitor_->stableKey) : nullptr;
-        const double total = map ? map->totalSeconds() : 0.0;
-        std::wostringstream message;
-        message << L"Current monitor exposure summary\n\nCharged time: " << std::fixed << std::setprecision(1)
-                << total << L" seconds\nGrid: 12 columns x 8 rows\n\nThis Phase 1 summary intentionally contains no historical analytics.";
-        MessageBoxW(controller_, message.str().c_str(), L"Exposure Statistics", MB_OK | MB_ICONINFORMATION);
-        break;
-    }
-    case kTrayPosition:
-        if (positioning_) endPositioningMode(); else beginPositioningMode();
-        break;
-    case kTrayExit:
-        PostQuitMessage(0);
-        break;
-    default:
-        break;
+    case kTrayToggle: toggleClock(); break;
+    case kTrayBrightness: triggerBrightnessBoost(); break;
+    case kTrayModeEdge: { auto next = settings_; next.movementMode = core::MovementMode::EdgeOnly; applySettings(next, true); break; }
+    case kTrayModeWhole: { auto next = settings_; next.movementMode = core::MovementMode::WholeScreen; applySettings(next, true); break; }
+    case kTrayModeLocal: { auto next = settings_; next.movementMode = core::MovementMode::LocalWander; applySettings(next, true); break; }
+    case kTrayOpacity16: { auto next = settings_; next.opacity = 0.16; applySettings(next, true); break; }
+    case kTrayOpacity24: { auto next = settings_; next.opacity = 0.24; applySettings(next, true); break; }
+    case kTrayOpacity32: { auto next = settings_; next.opacity = 0.32; applySettings(next, true); break; }
+    case kTrayOpacity45: { auto next = settings_; next.opacity = 0.45; applySettings(next, true); break; }
+    case kTraySettings: settingsWindow_.show(settings_, monitors_); break;
+    case kTrayStatistics: showStatisticsWindow(); break;
+    case kTrayPosition: if (positioning_) endPositioningMode(); else beginPositioningMode(); break;
+    case kTrayExit: PostQuitMessage(0); break;
+    default: break;
     }
 }
 
-void App::refreshMonitorsAndPlacement(bool preservePosition) {
+void App::showStatisticsWindow() {
+    const std::string selected = selectedMonitor_ ? selectedMonitor_->stableKey : std::string{};
+    statisticsWindow_.show(monitors_, exposure_, selected, settings_.movementMode);
+}
+
+void App::refreshOpenStatisticsWindow() {
+    if (!statisticsWindow_.visible()) return;
+    // An empty requested key tells the modeless window to preserve its valid
+    // user selection; refresh() never recenters or activates the window.
+    statisticsWindow_.refresh(monitors_, exposure_, {}, settings_.movementMode);
+}
+
+void App::resetExposureHistory() {
+    if (MessageBoxW(statisticsWindow_.visible() ? statisticsWindow_.hwnd() : controller_,
+                    L"Reset all saved exposure history for every monitor? This cannot be undone.",
+                    L"Reset exposure history", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+    // Settle against the old map first; otherwise updateExposureState would
+    // charge the interval before the reset into the newly cleared history.
+    exposureTracker_.settle(std::chrono::steady_clock::now());
+    exposure_.clear();
+    persistExposure();
+    updateExposureState();
+    if (statisticsWindow_.visible()) {
+        const std::string selected = selectedMonitor_ ? selectedMonitor_->stableKey : std::string{};
+        statisticsWindow_.refresh(monitors_, exposure_, selected, settings_.movementMode);
+    }
+    logger_.info(L"Exposure history reset by user");
+}
+
+void App::exportExposureCsv() {
+    wchar_t path[MAX_PATH] = L"adaptive-oled-clock-exposure.csv";
+    OPENFILENAMEW dialog{sizeof(OPENFILENAMEW)};
+    dialog.hwndOwner = statisticsWindow_.visible() ? statisticsWindow_.hwnd() : controller_;
+    dialog.lpstrFilter = L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(path));
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    dialog.lpstrDefExt = L"csv";
+    if (!GetSaveFileNameW(&dialog)) return;
+    std::ofstream output(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+    if (!output) {
+        MessageBoxW(dialog.hwndOwner, L"The CSV file could not be opened for writing.", L"Export failed", MB_OK | MB_ICONERROR);
+        return;
+    }
+    output << "monitor_key,column,row,charged_seconds\n";
+    output << std::setprecision(17);
+    for (const auto& [key, map] : exposure_.maps()) {
+        for (std::size_t row = 0; row < core::kExposureRows; ++row) {
+            for (std::size_t column = 0; column < core::kExposureColumns; ++column) {
+                output << csvQuote(key) << ',' << column + 1 << ',' << row + 1 << ',' << map.cell(column, row) << '\n';
+            }
+        }
+    }
+    output.flush();
+    if (!output) {
+        MessageBoxW(dialog.hwndOwner, L"The CSV export failed while writing the selected file.", L"Export failed", MB_OK | MB_ICONERROR);
+        return;
+    }
+    logger_.info(L"Exposure statistics exported to CSV");
+}
+
+void App::refreshMonitorsAndPlacement(bool preservePosition, bool honorPreferredPosition) {
     monitors_ = monitorService_.enumerate();
     for (auto& monitor : monitors_) monitor.displayOn = displayOn_;
     const core::MonitorSelection selection = core::selectMonitor(monitors_, settings_);
     if (!selection.selected.has_value()) {
         selectedMonitor_.reset();
         currentClockRect_ = {};
+        macroAnchorRect_ = {};
         overlay_.hide();
         updateExposureState();
         return;
     }
     const bool monitorChanged = !selectedMonitor_.has_value() ||
                                 selectedMonitor_->stableKey != selection.selected->stableKey;
+    if (monitorChanged) macroHistory_.clear();
     selectedMonitor_ = selection.selected;
     if (selection.usedPrimaryFallback) logger_.warning(L"Fixed monitor was missing; primary fallback selected");
     core::PlacementContext context = makePlacementContext();
@@ -354,14 +469,18 @@ void App::refreshMonitorsAndPlacement(bool preservePosition) {
                                    core::isValidPlacement(currentClockRect_, context);
     if (!currentStillValid) {
         context.previousRectPx.reset();
-        std::optional<core::RectI> placement = core::preferredPlacement(context);
+        std::optional<core::RectI> placement = honorPreferredPosition ? core::preferredPlacement(context) : std::nullopt;
         if (!placement.has_value()) {
             const core::ExposureMap* map = exposure_.find(selectedMonitor_->stableKey);
             const auto chosen = core::choosePlacement(context, map ? *map : core::ExposureMap{});
             if (chosen.has_value()) placement = chosen->boundsPx;
         }
         currentClockRect_ = placement.value_or(core::RectI{});
-        if (currentClockRect_.isValid()) logger_.info(L"Initial/refresh placement selected");
+        macroAnchorRect_ = {};
+        if (currentClockRect_.isValid()) {
+            rememberMacroPosition(currentClockRect_);
+            logger_.info(L"Initial/refresh placement selected");
+        }
     }
     updateExposureState();
 }
@@ -386,44 +505,53 @@ void App::refreshDisplayState(bool displayOn) {
 
 void App::refreshTimeAndRender() {
     renderAndPresent();
-    scheduleMinuteBoundary();
+    scheduleTimeBoundary();
+    scheduleMicroBoundary();
 }
 
 void App::renderAndPresent() {
     if (!selectedMonitor_.has_value()) return;
     const std::uint32_t dpi = selectedMonitor_->dpiX == 0 ? 96 : selectedMonitor_->dpiX;
-    core::SizeD measured{};
-    if (!renderer_.renderText(currentTimeText(), settings_.fontSizeDip, settings_.textColor,
-                              currentOpacity(), dpi, measured)) {
+    core::SizeD measuredText{};
+    core::SizeD measuredSurface{};
+    if (!renderer_.renderText(currentTimeText(), fromUtf8(settings_.fontFamily), settings_.fontWeight,
+                              settings_.fontSizeDip, settings_.textColor, currentOpacity(), dpi, positioning_,
+                              measuredText, measuredSurface)) {
         logger_.error(L"Clock text rendering failed");
         return;
     }
-    const bool sizeChanged = !nearlyEqual(measured.width, renderedSizeDip_.width) ||
-                             !nearlyEqual(measured.height, renderedSizeDip_.height);
-    renderedSizeDip_ = measured;
+    const bool sizeChanged = !nearlyEqual(measuredText.width, renderedSizeDip_.width) ||
+                             !nearlyEqual(measuredText.height, renderedSizeDip_.height);
+    renderedSizeDip_ = measuredText;
+    renderedSurfaceDip_ = measuredSurface;
     core::PlacementContext context = makePlacementContext();
-    const int expectedWidth = static_cast<int>(std::ceil(core::dipToPixels(measured.width, dpi)));
-    const int expectedHeight = static_cast<int>(std::ceil(core::dipToPixels(measured.height, dpi)));
+    const int expectedWidth = static_cast<int>(std::ceil(core::dipToPixels(measuredText.width, dpi)));
+    const int expectedHeight = static_cast<int>(std::ceil(core::dipToPixels(measuredText.height, dpi)));
     if (sizeChanged || !currentClockRect_.isValid() || currentClockRect_.width() != expectedWidth ||
         currentClockRect_.height() != expectedHeight || !core::isValidPlacement(currentClockRect_, context)) {
         context.previousRectPx.reset();
-        if (currentClockRect_.isValid()) {
-            context.preferredCenter = core::physicalPointToNormalized(currentClockRect_.center(), selectedMonitor_->boundsPx);
-        }
         std::optional<core::RectI> placement = core::preferredPlacement(context);
         if (!placement.has_value()) {
             const core::ExposureMap* map = exposure_.find(selectedMonitor_->stableKey);
             const auto chosen = core::choosePlacement(context, map ? *map : core::ExposureMap{});
             if (chosen.has_value()) placement = chosen->boundsPx;
         }
-        if (placement.has_value()) currentClockRect_ = *placement;
+        if (placement.has_value()) {
+            currentClockRect_ = *placement;
+            rememberMacroPosition(currentClockRect_);
+        }
     }
     const bool permitted = displayOn_ && sessionUnlocked_ &&
                            (positioning_ || (clockVisible_ && (!settings_.hideInFullscreen || !fullscreen_))) &&
                            currentClockRect_.isValid();
     if (permitted) {
-        RECT windowRect{currentClockRect_.left, currentClockRect_.top,
-                        currentClockRect_.right, currentClockRect_.bottom};
+        const int padding = positioning_ ? static_cast<int>(std::lround(core::dipToPixels(kPositioningPaddingDip, dpi))) : 0;
+        const int surfaceWidth = static_cast<int>(std::ceil(core::dipToPixels(renderedSurfaceDip_.width, dpi)));
+        const int surfaceHeight = static_cast<int>(std::ceil(core::dipToPixels(renderedSurfaceDip_.height, dpi)));
+        const core::RectI surface{currentClockRect_.left - padding, currentClockRect_.top - padding,
+                                  currentClockRect_.left - padding + std::max(currentClockRect_.width() + padding * 2, surfaceWidth),
+                                  currentClockRect_.top - padding + std::max(currentClockRect_.height() + padding * 2, surfaceHeight)};
+        RECT windowRect{surface.left, surface.top, surface.right, surface.bottom};
         overlay_.moveResize(windowRect);
         if (!renderer_.present(overlay_.hwnd(), POINT{windowRect.left, windowRect.top})) {
             logger_.warning(L"Layered window presentation failed");
@@ -435,13 +563,26 @@ void App::renderAndPresent() {
     updateExposureState();
 }
 
-void App::scheduleMinuteBoundary() {
+void App::scheduleTimeBoundary() {
     if (!controller_) return;
+    const auto now = std::chrono::system_clock::now();
+    const auto boundary = settings_.showSeconds ? core::nextSecondBoundary(now) : core::nextMinuteBoundary(now);
+    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(boundary - now).count();
+    milliseconds = std::clamp<long long>(milliseconds, 20, 0xFFFFFFFE);
+    SetTimer(controller_, kDisplayTimer, static_cast<UINT>(milliseconds), nullptr);
+}
+
+void App::scheduleMicroBoundary() {
+    if (!controller_) return;
+    if (!settings_.showSeconds) {
+        KillTimer(controller_, kMicroTimer);
+        return;
+    }
     const auto now = std::chrono::system_clock::now();
     const auto boundary = core::nextMinuteBoundary(now);
     auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(boundary - now).count();
     milliseconds = std::clamp<long long>(milliseconds, 50, 0xFFFFFFFE);
-    SetTimer(controller_, kMinuteTimer, static_cast<UINT>(milliseconds), nullptr);
+    SetTimer(controller_, kMicroTimer, static_cast<UINT>(milliseconds), nullptr);
 }
 
 void App::scheduleMajorMove() {
@@ -452,7 +593,8 @@ void App::scheduleMajorMove() {
 }
 
 void App::applyMajorMove() {
-    if (!selectedMonitor_.has_value() || !clockVisible_ || positioning_) {
+    if (!selectedMonitor_.has_value() || !clockVisible_ || positioning_ || !displayOn_ || !sessionUnlocked_ ||
+        (settings_.hideInFullscreen && fullscreen_)) {
         scheduleMajorMove();
         return;
     }
@@ -462,6 +604,7 @@ void App::applyMajorMove() {
     const auto candidate = core::choosePlacement(context, map ? *map : core::ExposureMap{});
     if (candidate.has_value() && candidate->boundsPx != currentClockRect_) {
         currentClockRect_ = candidate->boundsPx;
+        rememberMacroPosition(currentClockRect_);
         ++placementSeed_;
         logger_.info(L"Major exposure-balanced relocation");
         renderAndPresent();
@@ -470,18 +613,30 @@ void App::applyMajorMove() {
 }
 
 void App::applyMicroShift() {
-    if (!selectedMonitor_.has_value() || !clockVisible_ || positioning_ || !currentClockRect_.isValid()) return;
-    std::mt19937_64 generator(placementSeed_++);
-    std::uniform_real_distribution<double> shift(-2.0, 2.0);
-    core::PlacementContext context = makePlacementContext();
-    const int dx = static_cast<int>(std::lround(core::dipToPixels(shift(generator), context.dpi)));
-    const int dy = static_cast<int>(std::lround(core::dipToPixels(shift(generator), context.dpi)));
-    core::RectI shifted{currentClockRect_.left + dx, currentClockRect_.top + dy,
-                        currentClockRect_.right + dx, currentClockRect_.bottom + dy};
+    if (!selectedMonitor_.has_value() || !clockVisible_ || positioning_ || !displayOn_ || !sessionUnlocked_ ||
+        (settings_.hideInFullscreen && fullscreen_) || !settings_.microShiftEnabled ||
+        !currentClockRect_.isValid() || !macroAnchorRect_.isValid()) return;
+    const std::uint32_t dpi = selectedMonitor_->dpiX == 0 ? 96 : selectedMonitor_->dpiX;
+    const core::RectI anchor{macroAnchorRect_.left, macroAnchorRect_.top,
+                             macroAnchorRect_.left + currentClockRect_.width(),
+                             macroAnchorRect_.top + currentClockRect_.height()};
+    const core::RectI shifted = core::applyBoundedMicroShift(currentClockRect_, anchor,
+                                                              settings_.microShiftRadiusDip, dpi, placementSeed_++);
+    const core::PlacementContext context = makePlacementContext();
     if (!core::isValidPlacement(shifted, context)) return;
     currentClockRect_ = shifted;
-    logger_.info(L"Minute micro-shift applied");
+    logger_.info(L"Minute micro-shift applied within macro cage");
     renderAndPresent();
+}
+
+void App::rememberMacroPosition(const core::RectI& rect) {
+    if (!rect.isValid()) return;
+    if (macroAnchorRect_.isValid() && macroAnchorRect_ != rect) {
+        macroHistory_.erase(std::remove(macroHistory_.begin(), macroHistory_.end(), macroAnchorRect_), macroHistory_.end());
+        macroHistory_.insert(macroHistory_.begin(), macroAnchorRect_);
+        if (macroHistory_.size() > 12) macroHistory_.resize(12);
+    }
+    macroAnchorRect_ = rect;
 }
 
 void App::setClockVisible(bool visible, const wchar_t* reason) {
@@ -525,6 +680,8 @@ void App::endPositioningMode() {
     overlay_.setInteractive(false);
     if (selectedMonitor_.has_value() && currentClockRect_.isValid()) {
         settings_.preferredPosition = core::physicalPointToNormalized(currentClockRect_.center(), selectedMonitor_->boundsPx);
+        settings_.preferredPositionEnabled = true;
+        rememberMacroPosition(currentClockRect_);
         persistSettings();
     }
     logger_.info(L"Drag-to-position mode ended");
@@ -533,10 +690,13 @@ void App::endPositioningMode() {
 
 void App::handleDraggedPoint(POINT screenPoint) {
     if (!positioning_ || !selectedMonitor_.has_value() || !currentClockRect_.isValid()) return;
+    const std::uint32_t dpi = selectedMonitor_->dpiX == 0 ? 96 : selectedMonitor_->dpiX;
+    const int padding = static_cast<int>(std::lround(core::dipToPixels(kPositioningPaddingDip, dpi)));
     core::PlacementContext context = makePlacementContext();
     const int width = currentClockRect_.width();
     const int height = currentClockRect_.height();
-    core::RectI candidate{screenPoint.x, screenPoint.y, screenPoint.x + width, screenPoint.y + height};
+    core::RectI candidate{screenPoint.x + padding, screenPoint.y + padding,
+                          screenPoint.x + padding + width, screenPoint.y + padding + height};
     if (!core::isValidPlacement(candidate, context)) {
         const auto validCandidates = core::generateCandidates(context);
         const auto nearest = std::min_element(validCandidates.begin(), validCandidates.end(), [&](const core::RectI& first,
@@ -555,35 +715,127 @@ void App::handleDraggedPoint(POINT screenPoint) {
     }
 }
 
-void App::handleDragFinished() {
-    logger_.info(L"Drag-to-position pointer release");
-}
+void App::handleDragFinished() { logger_.info(L"Drag-to-position pointer release"); }
 
-void App::persistSettings() {
-    if (!saveSettings(paths_, settings_)) logger_.warning(L"Settings persistence failed");
+bool App::persistSettings() {
+    const bool saved = saveSettings(paths_, settings_);
+    if (!saved) {
+        logger_.warning(L"Settings persistence failed");
+        return false;
+    }
+    // Direct durable mutations (visibility and drag-to-position) use this same
+    // path, so the baseline advances only after the atomic save succeeds.
+    committedSettings_ = settings_;
+    return true;
 }
 
 void App::persistExposure() {
     if (!saveExposure(paths_, exposure_)) logger_.warning(L"Exposure persistence failed");
 }
 
-void App::applySettings(const core::Settings& incoming) {
-    settings_ = incoming;
-    settings_.validateAndNormalize();
+void App::applySettings(const core::Settings& incoming, bool committed) {
+    const core::Settings previousLive = settings_;
+    const core::Settings previousCommitted = committedSettings_;
+    core::Settings next = incoming;
+    next.validateAndNormalize();
+
+    struct SettingsDiff {
+        bool secondsChanged{false};
+        bool appearanceChanged{false};
+        bool movementModeChanged{false};
+        bool placementPolicyChanged{false};
+        bool monitorSelectionChanged{false};
+        bool movementIntervalChanged{false};
+        bool hotkeyChanged{false};
+        bool startupChanged{false};
+        bool anyChanged{false};
+    };
+    const auto diffSettings = [](const core::Settings& previous, const core::Settings& current) {
+        SettingsDiff diff;
+        diff.secondsChanged = previous.showSeconds != current.showSeconds;
+        diff.appearanceChanged = previous.timeFormat != current.timeFormat ||
+                                 previous.showAmPm != current.showAmPm ||
+                                 previous.showSeconds != current.showSeconds ||
+                                 previous.showDate != current.showDate ||
+                                 previous.fontFamily != current.fontFamily ||
+                                 previous.fontWeight != current.fontWeight ||
+                                 previous.fontSizeDip != current.fontSizeDip ||
+                                 previous.textColor != current.textColor ||
+                                 previous.opacity != current.opacity ||
+                                 previous.boostOpacity != current.boostOpacity;
+        diff.movementModeChanged = previous.movementMode != current.movementMode;
+        diff.placementPolicyChanged = diff.movementModeChanged ||
+                                      previous.allowedArea != current.allowedArea ||
+                                      previous.excludedAreas != current.excludedAreas ||
+                                      previous.edgeMarginDip != current.edgeMarginDip ||
+                                      previous.preferredPosition != current.preferredPosition ||
+                                      previous.preferredPositionEnabled != current.preferredPositionEnabled;
+        diff.monitorSelectionChanged = previous.monitorMode != current.monitorMode ||
+                                       previous.fixedMonitorKey != current.fixedMonitorKey;
+        diff.movementIntervalChanged = previous.movementIntervalMinutes != current.movementIntervalMinutes;
+        diff.hotkeyChanged = previous.hotkeyEnabled != current.hotkeyEnabled;
+        diff.startupChanged = previous.launchAtStartup != current.launchAtStartup;
+        diff.anyChanged = previous.version != current.version || diff.appearanceChanged || diff.placementPolicyChanged ||
+                          diff.monitorSelectionChanged || diff.movementIntervalChanged ||
+                          previous.microShiftEnabled != current.microShiftEnabled ||
+                          previous.microShiftRadiusDip != current.microShiftRadiusDip ||
+                          previous.hideInFullscreen != current.hideInFullscreen ||
+                          diff.startupChanged || diff.hotkeyChanged || previous.clockVisible != current.clockVisible ||
+                          previous.boostDurationSeconds != current.boostDurationSeconds;
+        return diff;
+    };
+
+    const SettingsDiff liveDiff = diffSettings(previousLive, next);
+    const SettingsDiff committedDiff = diffSettings(previousCommitted, next);
+    // The live state drives previews; the committed baseline drives persistence,
+    // registry/hotkey integrations, placement refreshes, and deferred timers.
+    const bool changed = liveDiff.anyChanged || (committed && committedDiff.anyChanged);
+    if (!changed) return;
+
+    const bool appearanceChanged = liveDiff.appearanceChanged || (committed && committedDiff.appearanceChanged);
+    const bool placementPolicyChanged = liveDiff.placementPolicyChanged ||
+                                        (committed && committedDiff.placementPolicyChanged);
+    const bool monitorSelectionChanged = liveDiff.monitorSelectionChanged ||
+                                         (committed && committedDiff.monitorSelectionChanged);
+    const bool hideInFullscreenChanged = previousLive.hideInFullscreen != next.hideInFullscreen ||
+                                         (committed && previousCommitted.hideInFullscreen != next.hideInFullscreen);
+    const bool clockVisibilityChanged = previousLive.clockVisible != next.clockVisible ||
+                                        (committed && previousCommitted.clockVisible != next.clockVisible);
+
+    settings_ = next;
     clockVisible_ = settings_.clockVisible;
-    persistSettings();
-    setStartupRegistration();
-    if (controller_) {
+    const bool settingsSaved = !committed || !committedDiff.anyChanged || persistSettings();
+
+    // Registry and hotkey state are external integrations; appearance previews
+    // must not touch them, and committed no-op changes must not churn them.
+    if (committed && committedDiff.startupChanged) setStartupRegistration();
+    if (committed && committedDiff.hotkeyChanged && controller_) {
         UnregisterHotKey(controller_, kHotkeyId);
         if (settings_.hotkeyEnabled && RegisterHotKey(controller_, kHotkeyId,
                                                        MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'C') == FALSE) {
             logger_.warning(L"Could not apply Ctrl+Alt+C hotkey setting");
         }
     }
-    logger_.info(L"Settings changed and persisted");
-    refreshMonitorsAndPlacement(true);
-    renderAndPresent();
-    scheduleMajorMove();
+
+    if (committed && (committedDiff.monitorSelectionChanged || committedDiff.placementPolicyChanged)) {
+        // A policy change is an anchor change, not merely a redraw: this forces
+        // Edge-only/allowed-area semantics immediately while preferred placement
+        // remains eligible only when it is valid under the new policy.
+        refreshMonitorsAndPlacement(false, !committedDiff.movementModeChanged);
+    }
+    if (appearanceChanged || placementPolicyChanged || monitorSelectionChanged || hideInFullscreenChanged ||
+        clockVisibilityChanged) {
+        renderAndPresent();
+    }
+    if (committed && committedDiff.secondsChanged) {
+        scheduleTimeBoundary();
+        scheduleMicroBoundary();
+    }
+    if (committed && committedDiff.movementIntervalChanged) scheduleMajorMove();
+    refreshOpenStatisticsWindow();
+    if (committed && committedDiff.anyChanged) {
+        logger_.info(settingsSaved ? L"Settings changed and persisted" : L"Settings changed; persistence failed");
+    }
 }
 
 void App::setStartupRegistration() {
@@ -618,18 +870,30 @@ RECT App::currentScreenRect() const {
 }
 
 double App::currentOpacity() const noexcept {
-    if (!brightnessBoosted_) return settings_.opacity;
-    return settings_.boostOpacity;
+    return brightnessBoosted_ ? settings_.boostOpacity : settings_.opacity;
 }
 
 std::wstring App::currentTimeText() const {
     SYSTEMTIME systemTime{};
     GetLocalTime(&systemTime);
     std::tm localTime{};
+    localTime.tm_year = systemTime.wYear - 1900;
+    localTime.tm_mon = systemTime.wMonth - 1;
+    localTime.tm_mday = systemTime.wDay;
     localTime.tm_hour = systemTime.wHour;
     localTime.tm_min = systemTime.wMinute;
     localTime.tm_sec = systemTime.wSecond;
-    return core::formatClockText(localTime, settings_.timeFormat, settings_.showAmPm, localeHourMode_);
+    std::wstring result = core::formatClockText(localTime, settings_.timeFormat, settings_.showAmPm,
+                                                localeHourMode_, settings_.showSeconds);
+    if (settings_.showDate) {
+        wchar_t date[128]{};
+        if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &systemTime, nullptr,
+                            date, static_cast<int>(std::size(date)), nullptr) > 0) {
+            result += L"\n";
+            result += date;
+        }
+    }
+    return result;
 }
 
 core::PlacementContext App::makePlacementContext() const {
@@ -645,7 +909,14 @@ core::PlacementContext App::makePlacementContext() const {
     context.allowedArea = settings_.allowedArea;
     context.excludedAreas = settings_.excludedAreas;
     context.mode = settings_.movementMode;
-    context.preferredCenter = settings_.preferredPosition;
+    if (settings_.preferredPositionEnabled) context.preferredCenter = settings_.preferredPosition;
+    context.previousRectPx = std::nullopt;
+    context.recentMacroRects = macroHistory_;
+    if (positioning_) {
+        const double extraWidth = std::max(0.0, renderedSurfaceDip_.width - renderedSizeDip_.width) / 2.0;
+        const double extraHeight = std::max(0.0, renderedSurfaceDip_.height - renderedSizeDip_.height) / 2.0;
+        context.surfacePaddingDip = kPositioningPaddingDip + std::max(extraWidth, extraHeight);
+    }
     context.randomSeed = placementSeed_;
     return context;
 }
@@ -675,6 +946,15 @@ void CALLBACK App::winEventProc(HWINEVENTHOOK, DWORD event, HWND window, LONG ob
 }
 
 LRESULT App::handleControllerMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    if (taskbarCreatedMessage_ && message == taskbarCreatedMessage_) {
+        trayCreated_ = false;
+        createTrayIcon();
+        return 0;
+    }
+    if (message == kShowSettingsMessage) {
+        settingsWindow_.show(settings_, monitors_);
+        return 0;
+    }
     if (message == trayMessage_) {
         const UINT event = static_cast<UINT>(lParam);
         if (event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_CONTEXTMENU) {
@@ -690,14 +970,18 @@ LRESULT App::handleControllerMessage(UINT message, WPARAM wParam, LPARAM lParam)
         else if (wParam == kPositioningEscapeHotkeyId && positioning_) endPositioningMode();
         return 0;
     case WM_TIMER:
-        if (wParam == kMinuteTimer) {
-            applyMicroShift();
+        if (wParam == kDisplayTimer) {
+            if (!settings_.showSeconds) applyMicroShift();
             refreshTimeAndRender();
+        } else if (wParam == kMicroTimer) {
+            applyMicroShift();
+            scheduleMicroBoundary();
         } else if (wParam == kMajorMoveTimer) {
             applyMajorMove();
         } else if (wParam == kExposureCheckpointTimer) {
             exposureTracker_.checkpoint(std::chrono::steady_clock::now());
             persistExposure();
+            refreshOpenStatisticsWindow();
         } else if (wParam == kBoostTimer) {
             KillTimer(controller_, kBoostTimer);
             brightnessBoosted_ = false;

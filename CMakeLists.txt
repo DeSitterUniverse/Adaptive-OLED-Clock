@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(AdaptiveOledClockCpp VERSION 0.1.0 LANGUAGES CXX)
+project(AdaptiveOledClockCpp VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ add_executable(adaptive_oled_clock WIN32
     src/platform/fullscreen_service.cpp
     src/platform/startup.cpp
     src/platform/settings_window.cpp
+    src/platform/statistics_window.cpp
 )
 target_include_directories(adaptive_oled_clock PRIVATE include)
 target_compile_definitions(adaptive_oled_clock PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
@@ -58,12 +59,14 @@ if (MSVC)
 endif()
 
 enable_testing()
-add_executable(aoc_core_tests tests/test_main.cpp)
-target_link_libraries(aoc_core_tests PRIVATE aoc_core)
-target_include_directories(aoc_core_tests PRIVATE include)
-if (MSVC)
-    target_compile_options(aoc_core_tests PRIVATE /W4 /permissive-)
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp")
+    add_executable(aoc_core_tests tests/test_main.cpp)
+    target_link_libraries(aoc_core_tests PRIVATE aoc_core)
+    target_include_directories(aoc_core_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(aoc_core_tests PRIVATE /W4 /permissive-)
+    endif()
+    add_test(NAME aoc_core_tests COMMAND aoc_core_tests)
 endif()
-add_test(NAME aoc_core_tests COMMAND aoc_core_tests)
 
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT adaptive_oled_clock)

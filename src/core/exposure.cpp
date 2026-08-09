@@ -104,6 +104,25 @@ double ExposureMap::cell(std::size_t column, std::size_t row) const noexcept {
     return seconds[row * kExposureColumns + column];
 }
 
+std::pair<std::size_t, std::size_t> ExposureMap::leastExposedCell() const noexcept {
+    const auto found = std::min_element(seconds.begin(), seconds.end());
+    const std::size_t index = static_cast<std::size_t>(std::distance(seconds.begin(), found));
+    return {index % kExposureColumns, index / kExposureColumns};
+}
+
+std::pair<std::size_t, std::size_t> ExposureMap::mostExposedCell() const noexcept {
+    const auto found = std::max_element(seconds.begin(), seconds.end());
+    const std::size_t index = static_cast<std::size_t>(std::distance(seconds.begin(), found));
+    return {index % kExposureColumns, index / kExposureColumns};
+}
+
+double ExposureMap::imbalance() const noexcept {
+    if (totalSeconds() <= std::numeric_limits<double>::epsilon()) return 0.0;
+    const auto [minimum, maximum] = std::minmax_element(seconds.begin(), seconds.end());
+    if (*maximum <= std::numeric_limits<double>::epsilon()) return 0.0;
+    return (*maximum - *minimum) / *maximum;
+}
+
 ExposureMap& ExposureStore::forMonitor(const std::string& stableKey) {
     return maps_[stableKey];
 }

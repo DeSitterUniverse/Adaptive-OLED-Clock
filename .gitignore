@@ -17,6 +17,11 @@
 settings.conf
 exposure.dat
 app.log
+*.csv
+/tests/
+/qa/
+/screenshots/
+/runtime/
 
 # Editor/OS noise
 .DS_Store

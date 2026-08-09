@@ -27,6 +27,7 @@ struct LoadedData {
     core::Settings settings;
     core::ExposureStore exposure;
     bool settingsRecovered{false};
+    bool settingsMigrated{false};
     bool exposureRecovered{false};
 };
 

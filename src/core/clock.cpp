@@ -21,7 +21,8 @@ bool useTwelveHourClock(TimeFormat configured, LocaleHourMode localeMode) noexce
 std::wstring formatClockText(const std::tm& localTime,
                              TimeFormat configured,
                              bool showAmPm,
-                             LocaleHourMode localeMode) {
+                             LocaleHourMode localeMode,
+                             bool showSeconds) {
     const bool twelveHour = useTwelveHourClock(configured, localeMode);
     int hour = localTime.tm_hour;
     std::wstring suffix;
@@ -38,6 +39,7 @@ std::wstring formatClockText(const std::tm& localTime,
         output << std::setw(2) << hour;
     }
     output << L':' << std::setw(2) << std::clamp(localTime.tm_min, 0, 59);
+    if (showSeconds) output << L':' << std::setw(2) << std::clamp(localTime.tm_sec, 0, 60);
     if (twelveHour && showAmPm) output << suffix;
     return output.str();
 }
@@ -46,6 +48,12 @@ std::chrono::system_clock::time_point nextMinuteBoundary(
     std::chrono::system_clock::time_point now) {
     const auto minute = std::chrono::time_point_cast<std::chrono::minutes>(now);
     return minute + std::chrono::minutes(1);
+}
+
+std::chrono::system_clock::time_point nextSecondBoundary(
+    std::chrono::system_clock::time_point now) {
+    const auto second = std::chrono::time_point_cast<std::chrono::seconds>(now);
+    return second + std::chrono::seconds(1);
 }
 
 LocaleHourMode localeHourModeFromPattern(const std::wstring& shortTimePattern) noexcept {

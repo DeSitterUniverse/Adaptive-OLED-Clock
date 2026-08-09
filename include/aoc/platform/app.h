@@ -11,6 +11,7 @@
 #include "aoc/platform/persistence.h"
 #include "aoc/platform/renderer.h"
 #include "aoc/platform/settings_window.h"
+#include "aoc/platform/statistics_window.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -24,7 +25,7 @@ namespace aoc::platform {
 
 class App {
 public:
-    App(HINSTANCE instance, int showCommand);
+    App(HINSTANCE instance, int showCommand, bool openSettingsOnStart = false);
     ~App();
 
     [[nodiscard]] int run();
@@ -43,12 +44,17 @@ private:
     void removeTrayIcon();
     void showTrayMenu(POINT screenPoint);
     void handleTrayCommand(UINT command);
-    void refreshMonitorsAndPlacement(bool preservePosition);
+    void showStatisticsWindow();
+    void refreshOpenStatisticsWindow();
+    void resetExposureHistory();
+    void exportExposureCsv();
+    void refreshMonitorsAndPlacement(bool preservePosition, bool honorPreferredPosition = true);
     void refreshFullscreenState();
     void refreshDisplayState(bool displayOn);
     void refreshTimeAndRender();
     void renderAndPresent();
-    void scheduleMinuteBoundary();
+    void scheduleTimeBoundary();
+    void scheduleMicroBoundary();
     void scheduleMajorMove();
     void applyMajorMove();
     void applyMicroShift();
@@ -59,9 +65,10 @@ private:
     void beginPositioningMode();
     void handleDraggedPoint(POINT screenPoint);
     void handleDragFinished();
-    void persistSettings();
+    void rememberMacroPosition(const core::RectI& rect);
+    bool persistSettings();
     void persistExposure();
-    void applySettings(const core::Settings& settings);
+    void applySettings(const core::Settings& settings, bool committed);
     void setStartupRegistration();
     void updateExposureState();
     void logState(const std::wstring& message);
@@ -74,11 +81,13 @@ private:
 
     HINSTANCE instance_{nullptr};
     int showCommand_{SW_SHOWNORMAL};
+    bool openSettingsOnStart_{false};
     HWND controller_{nullptr};
     HINSTANCE shellInstance_{nullptr};
     UINT trayMessage_{WM_APP + 1};
     NOTIFYICONDATAW trayIcon_{};
     bool trayCreated_{false};
+    bool trayFailureLogged_{false};
     bool initialized_{false};
     bool shuttingDown_{false};
     bool clockVisible_{true};
@@ -88,12 +97,20 @@ private:
     bool positioning_{false};
     bool brightnessBoosted_{false};
     bool comInitialized_{false};
+    bool anotherInstance_{false};
     std::chrono::steady_clock::time_point nextMajorMove_{};
     std::uint64_t placementSeed_{0xA0C0C0DEULL};
+    std::vector<core::RectI> macroHistory_;
+    core::RectI macroAnchorRect_{};
+    HANDLE singletonMutex_{nullptr};
+    UINT taskbarCreatedMessage_{0};
 
     DataPaths paths_;
     Logger logger_;
     core::Settings settings_;
+    // settings_ may contain an uncommitted live preview. Keep the durable
+    // baseline separate so a later commit still detects the net change.
+    core::Settings committedSettings_;
     core::ExposureStore exposure_;
     core::ExposureTracker exposureTracker_;
     MonitorService monitorService_;
@@ -101,10 +118,12 @@ private:
     std::optional<core::MonitorInfo> selectedMonitor_;
     core::RectI currentClockRect_{};
     core::SizeD renderedSizeDip_{80.0, 32.0};
+    core::SizeD renderedSurfaceDip_{80.0, 32.0};
     core::LocaleHourMode localeHourMode_{core::LocaleHourMode::TwentyFourHour};
     LayeredRenderer renderer_;
     OverlayWindow overlay_;
     SettingsWindow settingsWindow_;
+    StatisticsWindow statisticsWindow_;
     HWINEVENTHOOK foregroundHook_{nullptr};
     HWINEVENTHOOK locationChangeHook_{nullptr};
     HPOWERNOTIFY consoleDisplayPower_{nullptr};
