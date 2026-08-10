@@ -1,6 +1,6 @@
 # Adaptive OLED Clock
 
-Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keeps the current time visible in a transparent, click-through overlay while varying the clock's position so that exposure is not concentrated in one fixed area of the screen. The application is written in C++20 with Win32, Direct2D, and DirectWrite. The app aims to be minimal and performant. I created this app so I could have the time always up while also auto-hiding my taskbar, but it's good for anyone who wants to have a customizable digital clock on OLED monitors with user-adjustable mitigations for burn in,
+Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keeps the current time visible in a transparent, click-through overlay while varying the clock's position so that exposure is not concentrated in one fixed area of the screen. The application is written in C++20 with Win32, Direct2D, and DirectWrite. The app aims to be minimal and performant. I created this app so I could keep the time always visible while auto-hiding my taskbar, but it’s also great for anyone looking for a customizable digital clock for OLED monitors, with user-adjustable features designed to help mitigate burn-in.
 
 ## Features
 
@@ -25,7 +25,7 @@ The clock uses a small, practical exposure model rather than a panel-specific li
 2. While the clock is visible and the display/session policy allows charging, each visible interval is added to the cells covered by the clock. Cells receive exposure in proportion to the clock rectangle's overlap with them.
 3. When the clock moves, its selected movement mode defines the possible positions. Recent positions are avoided first; saved screen-use history is only a gentle tie-breaker. The default edge-only mode keeps the clock around the usable screen perimeter.
 
-History is maintained independently for each physical monitor, so one display does not affect another display's placement decisions. The configured number of optional small shifts is divided evenly across each major-movement interval. Second-by-second clock redraws never invoke placement. Position clock stores an anchor only for Local area; it is not a global startup position.
+History is maintained independently for each physical monitor, so one display does not affect another display's placement decisions. The configured number of optional small shifts is divided evenly across each major-movement interval. Second-by-second clock redraws never invoke placement. Position clock stores an anchor only for Local area.
 
 ## Requirements
 
