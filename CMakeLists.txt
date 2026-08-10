@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(aoc_core STATIC
     src/core/types.cpp
+    src/core/color.cpp
     src/core/geometry.cpp
     src/core/settings.cpp
     src/core/settings_change.cpp
@@ -37,6 +38,7 @@ add_executable(adaptive_oled_clock WIN32
     src/platform/startup.cpp
     src/platform/win32_ui.cpp
     src/platform/settings_window.cpp
+    src/platform/color_picker_window.cpp
     src/platform/statistics_window.cpp
 )
 target_include_directories(adaptive_oled_clock PRIVATE include resources)

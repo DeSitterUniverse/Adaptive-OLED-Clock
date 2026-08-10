@@ -93,11 +93,17 @@ public static class AocUiNative
     [DllImport("user32.dll", EntryPoint = "SendMessageW")]
     public static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", EntryPoint = "PostMessageW")]
+    public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+
     [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessageText(IntPtr hwnd, uint message, IntPtr wParam, StringBuilder text);
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
     [DllImport("user32.dll")]
     private static extern bool ScreenToClient(IntPtr hwnd, ref Point point);
@@ -185,6 +191,18 @@ public static class AocUiNative
     {
         Rect rect;
         return GetWindowRect(hwnd, out rect) ? rect : new Rect();
+    }
+
+    public static Rect ReadPhysicalRect(IntPtr hwnd)
+    {
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4)); // per-monitor aware v2
+        try {
+            Rect rect;
+            return GetWindowRect(hwnd, out rect) ? rect : new Rect();
+        }
+        finally {
+            if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous);
+        }
     }
 
     public static IntPtr DeepestChildAtTargetCenter(IntPtr root, IntPtr target)
@@ -352,7 +370,7 @@ function Save-WindowCapture {
         [IntPtr]$Window,
         [string]$Path
     )
-    $rect = [AocUiNative]::ReadRect($Window)
+    $rect = [AocUiNative]::ReadPhysicalRect($Window)
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
     if ($width -le 0 -or $height -le 0) { throw "Cannot capture invalid window bounds ${width}x${height}" }
@@ -400,6 +418,18 @@ function Get-MovementHistoryWindow {
         Start-Sleep -Milliseconds 100
     }
     throw 'Timed out waiting for the Movement History window'
+}
+
+function Get-ColorPickerWindow {
+    param([System.Diagnostics.Process]$Process)
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        $match = @([AocUiNative]::WindowsForProcess([uint32]$Process.Id)) | Where-Object {
+            $_.Visible -and $_.ClassName -eq 'AdaptiveOledClockColorPicker' -and $_.Text -eq 'Clock color'
+        } | Select-Object -First 1
+        if ($null -ne $match) { return $match }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'Timed out waiting for the Clock color picker'
 }
 
 function Test-ComboDropdown {
@@ -494,6 +524,7 @@ $evidence = [ordered]@{
     Movement = @{}
     MovementInterval = @{}
     Presets = @{}
+    ColorPicker = @{}
     SecondsStability = @{}
     CustomAllowedArea = @{}
     MovementHistory = @{}
@@ -553,6 +584,37 @@ try {
     }
     [AocUiNative]::SelectTabByKey($tab.Handle, 0)
     Start-Sleep -Milliseconds 100
+    $colorButton = Get-Control $settingsHwnd 1007 -Visible
+    if (-not [AocUiNative]::PostMessage($colorButton.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw 'Could not open the Clock color picker'
+    }
+    $colorPicker = Get-ColorPickerWindow $process
+    $hexEdit = Get-Control $colorPicker.Handle 2100 -Visible
+    $initialHex = [AocUiNative]::ReadText($hexEdit.Handle)
+    if ($initialHex -ne '#FFFFFF') { throw "Clock color picker opened with unexpected hex value '$initialHex'" }
+    [AocUiNative]::SetText($hexEdit.Handle, '#CC458F')
+    Start-Sleep -Milliseconds 100
+    $pickerCapture = Save-WindowCapture $colorPicker.Handle (Join-Path $runtime 'color-picker.png')
+    if (-not [AocUiNative]::PostMessage((Get-Control $colorPicker.Handle 1 -Visible).Handle, 0x00F5,
+                                        [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw 'Could not accept the Clock color selection'
+    }
+    $selectedColorText = ''
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        $selectedColorText = [AocUiNative]::ReadText($colorButton.Handle)
+        if ($selectedColorText -eq 'Clock color: #CC458F') { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($selectedColorText -ne 'Clock color: #CC458F') {
+        throw "Clock color selection did not return to Settings: '$selectedColorText'"
+    }
+    $evidence.ColorPicker = [ordered]@{
+        InitialHex = $initialHex
+        SelectedHex = '#CC458F'
+        SettingsText = $selectedColorText
+        Capture = $pickerCapture
+    }
+
     [AocUiNative]::SendMessage((Get-Control $settingsHwnd 1035 -Visible).Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     $oledOpacity = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1008 -Visible).Handle)
     $oledBoost = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1009 -Visible).Handle)
@@ -565,7 +627,7 @@ try {
         Count = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1023 -Visible).Handle)
         Distance = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1014 -Visible).Handle)
     }
-    if ($oledOpacity -ne '50' -or $oledBoost -ne '100' -or $oledColor -notlike '*176, 176, 176*' -or
+    if ($oledOpacity -ne '50' -or $oledBoost -ne '100' -or $oledColor -ne 'Clock color: #B0B0B0' -or
         $oledMovement.Hours -ne '0' -or $oledMovement.Minutes -ne '30' -or
         $oledMovement.Count -ne '4' -or $oledMovement.Distance -ne '5') {
         throw 'OLED preset values do not match the requested profile'
@@ -581,7 +643,7 @@ try {
     $defaultOpacity = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1008 -Visible).Handle)
     $defaultBoost = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1009 -Visible).Handle)
     $defaultColor = [AocUiNative]::ReadText((Get-Control $settingsHwnd 1007 -Visible).Handle)
-    if ($defaultOpacity -ne '80' -or $defaultBoost -ne '100' -or $defaultColor -notlike '*255, 255, 255*' -or
+    if ($defaultOpacity -ne '80' -or $defaultBoost -ne '100' -or $defaultColor -ne 'Clock color: #FFFFFF' -or
         $defaultMovement.Hours -ne '1' -or $defaultMovement.Count -ne '3' -or $defaultMovement.Distance -ne '3') {
         throw 'Default values do not match the requested profile'
     }

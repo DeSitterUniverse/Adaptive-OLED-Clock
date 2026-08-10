@@ -1,4 +1,5 @@
 #include "aoc/core/clock.h"
+#include "aoc/core/color.h"
 #include "aoc/core/exposure.h"
 #include "aoc/core/fullscreen.h"
 #include "aoc/core/geometry.h"
@@ -46,6 +47,22 @@ void checkNear(double actual, double expected, double tolerance, const char* exp
 #define CHECK_NEAR(actual, expected, tolerance) checkNear((actual), (expected), (tolerance), #actual " ~= " #expected)
 
 constexpr double kTolerance = 1e-9;
+
+void testColorConversionAndHexInput() {
+    beginScenario("color picker RGB, HSV, and hex conversion");
+    const aoc::core::Color sample{204, 69, 143, 255};
+    CHECK(aoc::core::colorToHex(sample) == "#CC458F");
+    CHECK(aoc::core::parseHexColor("#cc458f") == sample);
+    CHECK(aoc::core::parseHexColor(" C48 ") == aoc::core::Color{204, 68, 136, 255});
+    CHECK(!aoc::core::parseHexColor("#12GG56").has_value());
+    CHECK(!aoc::core::parseHexColor("#12345").has_value());
+
+    const auto hsv = aoc::core::rgbToHsv(sample);
+    CHECK(aoc::core::hsvToRgb(hsv) == sample);
+    CHECK(aoc::core::hsvToRgb({0.0, 1.0, 1.0}) == aoc::core::Color{255, 0, 0, 255});
+    CHECK(aoc::core::hsvToRgb({120.0, 1.0, 1.0}) == aoc::core::Color{0, 255, 0, 255});
+    CHECK(aoc::core::hsvToRgb({240.0, 1.0, 1.0}) == aoc::core::Color{0, 0, 255, 255});
+}
 
 void testClockFormattingAndBoundaries() {
     beginScenario("clock format selection, AM/PM, seconds, and locale pattern detection");
@@ -733,6 +750,7 @@ void testSettingsChangeClassification() {
 } // namespace
 
 int main() {
+    testColorConversionAndHexInput();
     testClockFormattingAndBoundaries();
     testGeometryAndDpi();
     testSettingsDefaultsMigrationAndRecovery();

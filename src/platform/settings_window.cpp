@@ -1,10 +1,11 @@
 #include "aoc/platform/settings_window.h"
 
 #include "aoc/core/geometry.h"
+#include "aoc/core/color.h"
+#include "aoc/platform/color_picker_window.h"
 #include "aoc/platform/win32_ui.h"
 
 #include <commctrl.h>
-#include <commdlg.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
@@ -82,6 +83,10 @@ HBRUSH stockBrush(HDC dc, COLORREF color) {
 
 void setText(HWND control, const std::wstring& value) {
     if (control) SetWindowTextW(control, value.c_str());
+}
+
+std::wstring colorButtonText(core::Color color) {
+    return L"Clock color: " + wideFromUtf8(core::colorToHex(color));
 }
 
 std::wstring numberText(double value) {
@@ -981,8 +986,7 @@ void SettingsWindow::syncClockPage() {
                                                          reinterpret_cast<LPARAM>(selectedFamily.c_str())));
     }
     SendMessageW(fontFamily_, CB_SETCURSEL, std::max(0, familySelection), 0);
-    setText(colorButton_, L"Clock color: " + std::to_wstring(settings_.textColor.r) + L", " +
-                           std::to_wstring(settings_.textColor.g) + L", " + std::to_wstring(settings_.textColor.b));
+    setText(colorButton_, colorButtonText(settings_.textColor));
 }
 
 void SettingsWindow::syncMovementPage() {
@@ -1159,16 +1163,10 @@ void SettingsWindow::applyFromControls(bool committed) {
 }
 
 void SettingsWindow::chooseTextColor() {
-    CHOOSECOLORW chooser{sizeof(CHOOSECOLORW)};
-    COLORREF customColors[16]{};
-    chooser.hwndOwner = hwnd_;
-    chooser.rgbResult = RGB(settings_.textColor.r, settings_.textColor.g, settings_.textColor.b);
-    chooser.lpCustColors = customColors;
-    chooser.Flags = CC_FULLOPEN | CC_RGBINIT;
-    if (ChooseColorW(&chooser)) {
-        settings_.textColor = {GetRValue(chooser.rgbResult), GetGValue(chooser.rgbResult), GetBValue(chooser.rgbResult), 255};
-        setText(colorButton_, L"Clock color: " + std::to_wstring(settings_.textColor.r) + L", " +
-                               std::to_wstring(settings_.textColor.g) + L", " + std::to_wstring(settings_.textColor.b));
+    if (const auto selected = ColorPickerWindow::choose(instance_, hwnd_, settings_.textColor)) {
+        settings_.textColor = *selected;
+        setText(colorButton_, colorButtonText(settings_.textColor));
+        InvalidateRect(colorButton_, nullptr, FALSE);
         dirty_ = true;
         setText(statusLabel_, L"Unsaved changes — select Apply when ready.");
     }
