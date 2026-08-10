@@ -210,7 +210,7 @@ LRESULT CALLBACK SettingsWindow::pageControlSubclassProc(HWND control, UINT mess
     auto* self = reinterpret_cast<SettingsWindow*>(refData);
     if (self) {
         if (control == self->pageHost_ &&
-            (message == WM_COMMAND || message == WM_CTLCOLORSTATIC ||
+            (message == WM_COMMAND || message == WM_DRAWITEM || message == WM_CTLCOLORSTATIC ||
              message == WM_CTLCOLORBTN || message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX)) {
             return SendMessageW(self->hwnd_, message, wParam, lParam);
         }
