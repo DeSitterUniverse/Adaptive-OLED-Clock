@@ -36,7 +36,7 @@ private:
     void setFromPoint(POINT point);
     void setHueFromPoint(POINT point);
     void setColor(core::Color color, bool updateHex);
-    void updateHexText();
+    void updateHexText(bool force = false);
     void readHexText();
     void finish(bool accepted);
     [[nodiscard]] RECT presetRect(std::size_t index) const noexcept;
@@ -59,6 +59,8 @@ private:
     bool draggingHue_{false};
     bool finished_{false};
     bool accepted_{false};
+    bool bufferedPaintInitialized_{false};
+    ULONGLONG lastHexUpdateTick_{0};
     RECT fieldRect_{};
     RECT hueRect_{};
     RECT swatchRect_{};

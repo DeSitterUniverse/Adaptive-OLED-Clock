@@ -103,6 +103,12 @@ public static class AocUiNative
     private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
 
     [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
     private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
     [DllImport("user32.dll")]
@@ -199,6 +205,36 @@ public static class AocUiNative
         try {
             Rect rect;
             return GetWindowRect(hwnd, out rect) ? rect : new Rect();
+        }
+        finally {
+            if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous);
+        }
+    }
+
+    public static Rect ReadPhysicalClientRect(IntPtr hwnd)
+    {
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        try {
+            Rect rect;
+            return GetClientRect(hwnd, out rect) ? rect : new Rect();
+        }
+        finally {
+            if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous);
+        }
+    }
+
+    public static uint ReadDpi(IntPtr hwnd)
+    {
+        uint dpi = GetDpiForWindow(hwnd);
+        return dpi == 0 ? 96u : dpi;
+    }
+
+    public static bool PostMouse(IntPtr hwnd, uint message, int x, int y, bool buttonDown)
+    {
+        long packed = ((long)(y & 0xFFFF) << 16) | (uint)(x & 0xFFFF);
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        try {
+            return PostMessage(hwnd, message, buttonDown ? new IntPtr(1) : IntPtr.Zero, new IntPtr(packed));
         }
         finally {
             if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous);
@@ -594,6 +630,39 @@ try {
     if ($initialHex -ne '#FFFFFF') { throw "Clock color picker opened with unexpected hex value '$initialHex'" }
     [AocUiNative]::SetText($hexEdit.Handle, '#CC458F')
     Start-Sleep -Milliseconds 100
+    $pickerClient = [AocUiNative]::ReadPhysicalClientRect($colorPicker.Handle)
+    $pickerScale = [double]([AocUiNative]::ReadDpi($colorPicker.Handle)) / 96.0
+    $pickerMargin = [int][Math]::Round(24 * $pickerScale)
+    $buttonHeight = [int][Math]::Round(40 * $pickerScale)
+    $buttonY = [Math]::Max([int][Math]::Round(480 * $pickerScale),
+                           $pickerClient.Bottom - $pickerMargin - $buttonHeight)
+    $presetsTop = $buttonY - [int][Math]::Round(70 * $pickerScale)
+    $swatchTop = $presetsTop - [int][Math]::Round(92 * $pickerScale)
+    $hueTop = $swatchTop - [int][Math]::Round(42 * $pickerScale)
+    $hueY = $hueTop + [int][Math]::Round(9 * $pickerScale)
+    $hueLeft = $pickerMargin
+    $hueRight = $pickerClient.Right - $pickerMargin - 1
+    [AocUiNative]::PostMouse($colorPicker.Handle, 0x0201, $hueLeft, $hueY, $true) | Out-Null # WM_LBUTTONDOWN
+    $sliderStressMoves = 0
+    for ($pass = 0; $pass -lt 4; $pass++) {
+        for ($step = 0; $step -le 100; $step++) {
+            $fraction = if (($pass % 2) -eq 0) { $step / 100.0 } else { 1.0 - $step / 100.0 }
+            $x = [int][Math]::Round($hueLeft + ($hueRight - $hueLeft) * $fraction)
+            [AocUiNative]::PostMouse($colorPicker.Handle, 0x0200, $x, $hueY, $true) | Out-Null # WM_MOUSEMOVE
+            $sliderStressMoves++
+        }
+    }
+    [AocUiNative]::PostMouse($colorPicker.Handle, 0x0202, $hueRight, $hueY, $false) | Out-Null # WM_LBUTTONUP
+    Start-Sleep -Milliseconds 500
+    $hexAfterSlider = [AocUiNative]::ReadText($hexEdit.Handle)
+    if ($hexAfterSlider -notmatch '^#[0-9A-F]{6}$') {
+        throw "Clock color hex field became unstable after slider input: '$hexAfterSlider'"
+    }
+    if ($hexAfterSlider -eq '#CC458F') {
+        throw "Clock color did not respond to high-frequency hue slider input (client=$($pickerClient.Right)x$($pickerClient.Bottom), dpi=$([AocUiNative]::ReadDpi($colorPicker.Handle)), hue=$hueLeft..$hueRight at $hueY)"
+    }
+    [AocUiNative]::SetText($hexEdit.Handle, '#CC458F')
+    Start-Sleep -Milliseconds 100
     $pickerCapture = Save-WindowCapture $colorPicker.Handle (Join-Path $runtime 'color-picker.png')
     if (-not [AocUiNative]::PostMessage((Get-Control $colorPicker.Handle 1 -Visible).Handle, 0x00F5,
                                         [IntPtr]::Zero, [IntPtr]::Zero)) {
@@ -608,10 +677,27 @@ try {
     if ($selectedColorText -ne 'Clock color: #CC458F') {
         throw "Clock color selection did not return to Settings: '$selectedColorText'"
     }
+    if (-not [AocUiNative]::PostMessage($colorButton.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw 'Could not reopen the Clock color picker'
+    }
+    $reopenedColorPicker = Get-ColorPickerWindow $process
+    $reopenedHex = [AocUiNative]::ReadText((Get-Control $reopenedColorPicker.Handle 2100 -Visible).Handle)
+    if ($reopenedHex -ne '#CC458F') {
+        throw "Clock color picker did not restore the selected hex value: '$reopenedHex'"
+    }
+    [AocUiNative]::PostMessage((Get-Control $reopenedColorPicker.Handle 2 -Visible).Handle, 0x00F5,
+                               [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    for ($attempt = 0; $attempt -lt 30 -and -not [AocUiNative]::Enabled($settingsHwnd); $attempt++) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not [AocUiNative]::Enabled($settingsHwnd)) { throw 'Settings did not recover after closing the color picker' }
     $evidence.ColorPicker = [ordered]@{
         InitialHex = $initialHex
+        SliderStressMoves = $sliderStressMoves
+        HexAfterSlider = $hexAfterSlider
         SelectedHex = '#CC458F'
         SettingsText = $selectedColorText
+        ReopenedHex = $reopenedHex
         Capture = $pickerCapture
     }
 

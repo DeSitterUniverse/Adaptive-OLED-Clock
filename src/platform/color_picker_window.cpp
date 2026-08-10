@@ -3,6 +3,7 @@
 #include "aoc/platform/win32_ui.h"
 
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -57,6 +58,7 @@ ColorPickerWindow::ColorPickerWindow(HINSTANCE instance, HWND owner, core::Color
 
 ColorPickerWindow::~ColorPickerWindow() {
     if (hwnd_) DestroyWindow(hwnd_);
+    if (bufferedPaintInitialized_) BufferedPaintUnInit();
 }
 
 std::optional<core::Color> ColorPickerWindow::choose(HINSTANCE instance, HWND owner,
@@ -80,7 +82,7 @@ bool ColorPickerWindow::create() {
     if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
     hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kColorPickerClass,
-                            L"Clock color", WS_CAPTION | WS_SYSMENU | WS_POPUP,
+                            L"Clock color", WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_CLIPCHILDREN,
                             CW_USEDEFAULT, CW_USEDEFAULT, 500, 660, owner_, nullptr, instance_, this);
     if (!hwnd_) return false;
     dpi_ = GetDpiForWindow(hwnd_);
@@ -91,6 +93,7 @@ bool ColorPickerWindow::create() {
                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                                  L"Segoe UI Variable Display"));
     if (!font_) return false;
+    bufferedPaintInitialized_ = SUCCEEDED(BufferedPaintInit());
 
     hexEdit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                ES_AUTOHSCROLL | ES_UPPERCASE,
@@ -107,7 +110,7 @@ bool ColorPickerWindow::create() {
     SendMessageW(hexEdit_, EM_SETLIMITTEXT, 7, 0);
     SendMessageW(hexEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(scale(8), scale(8)));
     SendMessageW(hwnd_, DM_SETDEFID, IDOK, 0);
-    updateHexText();
+    updateHexText(true);
     applyTheme();
     return true;
 }
@@ -116,6 +119,7 @@ std::optional<core::Color> ColorPickerWindow::run() {
     const RECT bounds = centeredWindowRect(owner_, hwnd_, 500, 660, dpi_);
     SetWindowPos(hwnd_, HWND_TOP, bounds.left, bounds.top, bounds.right - bounds.left,
                  bounds.bottom - bounds.top, SWP_SHOWWINDOW);
+    updateHexText(true);
     const bool restoreOwner = owner_ && IsWindowEnabled(owner_);
     if (restoreOwner) EnableWindow(owner_, FALSE);
     SetForegroundWindow(hwnd_);
@@ -200,15 +204,21 @@ void ColorPickerWindow::paintGradient(HDC dc, const RECT& bounds) const {
         gradientHeight_ = height;
         gradientHue_ = hsv_.hue;
         gradientPixels_.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+        const core::Color hueColor = core::hsvToRgb({hsv_.hue, 1.0, 1.0});
+        const int maximumX = std::max(1, width - 1);
+        const int maximumY = std::max(1, height - 1);
         for (int y = 0; y < height; ++y) {
-            const double value = 1.0 - static_cast<double>(y) / std::max(1, height - 1);
+            const int value = maximumY - y;
             for (int x = 0; x < width; ++x) {
-                const double saturation = static_cast<double>(x) / std::max(1, width - 1);
-                const core::Color color = core::hsvToRgb({hsv_.hue, saturation, value});
+                const int inverseSaturation = maximumX - x;
+                const int redAtFullValue = (255 * inverseSaturation + hueColor.r * x) / maximumX;
+                const int greenAtFullValue = (255 * inverseSaturation + hueColor.g * x) / maximumX;
+                const int blueAtFullValue = (255 * inverseSaturation + hueColor.b * x) / maximumX;
+                const auto red = static_cast<std::uint32_t>(redAtFullValue * value / maximumY);
+                const auto green = static_cast<std::uint32_t>(greenAtFullValue * value / maximumY);
+                const auto blue = static_cast<std::uint32_t>(blueAtFullValue * value / maximumY);
                 gradientPixels_[static_cast<std::size_t>(y) * width + x] =
-                    static_cast<std::uint32_t>(color.b) |
-                    (static_cast<std::uint32_t>(color.g) << 8U) |
-                    (static_cast<std::uint32_t>(color.r) << 16U);
+                    blue | (green << 8U) | (red << 16U);
             }
         }
     }
@@ -353,7 +363,7 @@ void ColorPickerWindow::setColor(core::Color color, bool updateHex) {
     color_ = color;
     hsv_ = core::rgbToHsv(color_);
     hexValid_ = true;
-    if (updateHex) updateHexText();
+    if (updateHex) updateHexText(true);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -378,8 +388,11 @@ void ColorPickerWindow::setHueFromPoint(POINT point) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void ColorPickerWindow::updateHexText() {
+void ColorPickerWindow::updateHexText(bool force) {
     if (!hexEdit_) return;
+    const ULONGLONG now = GetTickCount64();
+    if (!force && now - lastHexUpdateTick_ < 32) return;
+    lastHexUpdateTick_ = now;
     syncingHex_ = true;
     const std::wstring text = wideFromUtf8(core::colorToHex(color_));
     SetWindowTextW(hexEdit_, text.c_str());
@@ -466,7 +479,17 @@ LRESULT ColorPickerWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPa
     case WM_PAINT: {
         PAINTSTRUCT paintInfo{};
         HDC dc = BeginPaint(hwnd_, &paintInfo);
-        paint(dc);
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        HDC bufferedDc = nullptr;
+        HPAINTBUFFER buffer = BeginBufferedPaint(dc, &client, BPBF_COMPATIBLEBITMAP, nullptr, &bufferedDc);
+        if (buffer && bufferedDc) {
+            paint(bufferedDc);
+            EndBufferedPaint(buffer, TRUE);
+        } else {
+            if (buffer) EndBufferedPaint(buffer, FALSE);
+            paint(dc);
+        }
         EndPaint(hwnd_, &paintInfo);
         return 0;
     }
@@ -495,7 +518,7 @@ LRESULT ColorPickerWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPa
         } else if (id == kHexEditId && notification == EN_KILLFOCUS) {
             if (!hexValid_) {
                 hexValid_ = true;
-                updateHexText();
+                updateHexText(true);
             }
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else if (id == IDOK && notification == BN_CLICKED) finish(true);
@@ -506,12 +529,14 @@ LRESULT ColorPickerWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPa
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         if (PtInRect(&fieldRect_, point)) {
             draggingField_ = true;
+            SetFocus(hwnd_);
             SetCapture(hwnd_);
             setFromPoint(point);
             return 0;
         }
         if (PtInRect(&hueRect_, point)) {
             draggingHue_ = true;
+            SetFocus(hwnd_);
             SetCapture(hwnd_);
             setHueFromPoint(point);
             return 0;
@@ -530,11 +555,13 @@ LRESULT ColorPickerWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPa
         else if (draggingHue_) setHueFromPoint({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
         return 0;
     case WM_LBUTTONUP:
+        updateHexText(true);
         draggingField_ = false;
         draggingHue_ = false;
         if (GetCapture() == hwnd_) ReleaseCapture();
         return 0;
     case WM_CAPTURECHANGED:
+        updateHexText(true);
         draggingField_ = false;
         draggingHue_ = false;
         return 0;
