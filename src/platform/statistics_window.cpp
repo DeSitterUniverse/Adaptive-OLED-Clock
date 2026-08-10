@@ -1,4 +1,5 @@
 #include "aoc/platform/statistics_window.h"
+#include "aoc/platform/win32_ui.h"
 
 #include <commctrl.h>
 
@@ -16,43 +17,20 @@ constexpr int kResetId = 6101;
 constexpr int kExportId = 6102;
 constexpr int kCloseId = 6103;
 
-std::wstring fromUtf8(const std::string& value) {
-    if (value.empty()) return {};
-    const int required = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (required <= 0) return {};
-    std::wstring result(static_cast<std::size_t>(required), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), required);
-    return result;
-}
-
 const wchar_t* modeName(core::MovementMode mode) {
     switch (mode) {
     case core::MovementMode::WholeScreen: return L"Whole screen";
-    case core::MovementMode::LocalWander: return L"Local wander";
-    case core::MovementMode::EdgeOnly: return L"Edge-only";
+    case core::MovementMode::LocalWander: return L"Local area";
+    case core::MovementMode::EdgeOnly: return L"Edge only";
+    case core::MovementMode::FourCorners: return L"Four corners";
     default: return L"Unknown";
     }
-}
-
-RECT fitToWorkArea(RECT proposed) {
-    const HMONITOR monitor = MonitorFromRect(&proposed, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO info{sizeof(MONITORINFO)};
-    if (!monitor || !GetMonitorInfoW(monitor, &info)) return proposed;
-    const RECT work = info.rcWork;
-    const int width = std::min(std::max(1L, proposed.right - proposed.left), work.right - work.left);
-    const int height = std::min(std::max(1L, proposed.bottom - proposed.top), work.bottom - work.top);
-    proposed.left = work.left + std::clamp((proposed.left - work.left), 0L, work.right - work.left - width);
-    proposed.top = work.top + std::clamp((proposed.top - work.top), 0L, work.bottom - work.top - height);
-    proposed.right = proposed.left + width;
-    proposed.bottom = proposed.top + height;
-    return proposed;
 }
 
 } // namespace
 
 StatisticsWindow::~StatisticsWindow() {
     if (hwnd_) DestroyWindow(hwnd_);
-    if (controlFont_) DeleteObject(controlFont_);
 }
 
 bool StatisticsWindow::create(HINSTANCE instance, HWND owner, SimpleCallback onReset,
@@ -67,40 +45,41 @@ bool StatisticsWindow::create(HINSTANCE instance, HWND owner, SimpleCallback onR
     windowClass.lpfnWndProc = &StatisticsWindow::windowProc;
     windowClass.lpszClassName = kStatisticsClass;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hIcon = loadApplicationIcon(instance_, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    windowClass.hIconSm = loadApplicationIcon(instance_, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    RegisterClassExW(&windowClass);
+    if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
     // The controller is HWND_MESSAGE-only. Statistics is deliberately a regular
     // top-level window so it remains discoverable and keyboard-accessible.
-    hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kStatisticsClass, L"Adaptive OLED Clock - Exposure Statistics",
+    hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kStatisticsClass, L"Adaptive OLED Clock - Movement History",
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX,
                             CW_USEDEFAULT, CW_USEDEFAULT, 720, 600, nullptr, nullptr, instance_, this);
     if (!hwnd_) return false;
     dpi_ = GetDpiForWindow(hwnd_);
     if (dpi_ == 0) dpi_ = 96;
-    controlFont_ = CreateFontW(-scale(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    controlFont_.reset(createControlFont(dpi_));
+    if (!controlFont_) return false;
     monitorCombo_ = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                                     0, 0, scale(320), scale(240), hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMonitorId)), instance_, nullptr);
     totalLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
     leastLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
     imbalanceLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
     modeLabel_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 400, 24, hwnd_, nullptr, instance_, nullptr);
-    resetButton_ = CreateWindowExW(0, L"BUTTON", L"Reset exposure history...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    resetButton_ = CreateWindowExW(0, L"BUTTON", L"Clear history...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                    0, 0, 170, 30, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResetId)), instance_, nullptr);
-    exportButton_ = CreateWindowExW(0, L"BUTTON", L"Export CSV...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    exportButton_ = CreateWindowExW(0, L"BUTTON", L"Save CSV...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                     0, 0, 120, 30, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kExportId)), instance_, nullptr);
     closeButton_ = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                    0, 0, 90, 30, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCloseId)), instance_, nullptr);
-    for (HWND control : {monitorCombo_, totalLabel_, leastLabel_, imbalanceLabel_, modeLabel_, resetButton_, exportButton_, closeButton_}) {
-        if (control && controlFont_) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(controlFont_), TRUE);
-    }
-    return monitorCombo_ && totalLabel_ && leastLabel_ && imbalanceLabel_ && modeLabel_ && resetButton_ &&
-           exportButton_ && closeButton_;
+    controls_ = {monitorCombo_, totalLabel_, leastLabel_, imbalanceLabel_, modeLabel_,
+                 resetButton_, exportButton_, closeButton_};
+    if (std::any_of(controls_.begin(), controls_.end(), [](HWND control) { return !control; })) return false;
+    for (HWND control : controls_) setControlFont(control, controlFont_.get());
+    return true;
 }
 
 int StatisticsWindow::scale(int value) const noexcept {
-    return MulDiv(value, dpi_ == 0 ? 96 : static_cast<int>(dpi_), 96);
+    return scaleDip(value, dpi_);
 }
 
 void StatisticsWindow::show(const std::vector<core::MonitorInfo>& monitors,
@@ -109,29 +88,9 @@ void StatisticsWindow::show(const std::vector<core::MonitorInfo>& monitors,
                             core::MovementMode mode) {
     if (!hwnd_) return;
     refresh(monitors, exposure, selectedKey, mode);
-    RECT workArea{};
-    const HMONITOR monitor = MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO info{sizeof(MONITORINFO)};
-    if (monitor && GetMonitorInfoW(monitor, &info)) workArea = info.rcWork;
-    else {
-        workArea.left = 0;
-        workArea.top = 0;
-        workArea.right = GetSystemMetrics(SM_CXSCREEN);
-        workArea.bottom = GetSystemMetrics(SM_CYSCREEN);
-    }
-    RECT current{};
-    GetWindowRect(hwnd_, &current);
-    const int currentWidth = static_cast<int>(current.right - current.left);
-    const int currentHeight = static_cast<int>(current.bottom - current.top);
-    const int workWidth = static_cast<int>(workArea.right - workArea.left);
-    const int workHeight = static_cast<int>(workArea.bottom - workArea.top);
-    const int availableWidth = std::max(1, workWidth - scale(24));
-    const int availableHeight = std::max(1, workHeight - scale(24));
-    const int width = std::min(std::max(std::min(scale(640), availableWidth), currentWidth), availableWidth);
-    const int height = std::min(std::max(std::min(scale(520), availableHeight), currentHeight), availableHeight);
-    const int left = static_cast<int>(workArea.left) + std::max(0, (workWidth - width) / 2);
-    const int top = static_cast<int>(workArea.top) + std::max(0, (workHeight - height) / 2);
-    SetWindowPos(hwnd_, HWND_TOP, left, top, width, height, SWP_SHOWWINDOW);
+    const RECT bounds = centeredWindowRect(owner_, hwnd_, 640, 520, dpi_);
+    SetWindowPos(hwnd_, HWND_TOP, bounds.left, bounds.top,
+                 bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd_);
 }
 
@@ -171,7 +130,7 @@ void StatisticsWindow::syncMonitorCombo() {
     int selected = 0;
     for (std::size_t index = 0; index < monitors_.size(); ++index) {
         const auto& monitor = monitors_[index];
-        std::wstring name = fromUtf8(monitor.stableKey);
+        std::wstring name = wideFromUtf8(monitor.stableKey);
         if (!monitor.displayName.empty()) name = monitor.displayName;
         if (monitor.primary) name += L" (Primary)";
         SendMessageW(monitorCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
@@ -188,17 +147,23 @@ void StatisticsWindow::updateSummary() {
     if (!map) map = &empty;
     const auto least = map->leastExposedCell();
     const auto most = map->mostExposedCell();
+    const double trackedMinutes = map->totalSeconds() / 60.0;
     std::wostringstream total;
-    total << L"Charged visible time: " << std::fixed << std::setprecision(1) << map->totalSeconds() << L" seconds";
+    total << L"Time tracked: " << std::fixed << std::setprecision(1) << trackedMinutes << L" minutes";
     std::wostringstream leastText;
-    leastText << L"Least exposed cell: column " << least.first + 1 << L", row " << least.second + 1;
     std::wostringstream imbalance;
-    imbalance << L"Imbalance: " << std::fixed << std::setprecision(1) << map->imbalance() * 100.0
-              << L"% (most exposed cell: column " << most.first + 1 << L", row " << most.second + 1 << L")";
+    if (trackedMinutes < 5.0) {
+        leastText << L"Least-used area: available after 5 minutes";
+        imbalance << L"Coverage: collecting more history";
+    } else {
+        leastText << L"Least-used area: column " << least.first + 1 << L", row " << least.second + 1;
+        imbalance << L"Coverage difference: " << std::fixed << std::setprecision(1) << map->imbalance() * 100.0
+                  << L"% (most-used area: column " << most.first + 1 << L", row " << most.second + 1 << L")";
+    }
     SetWindowTextW(totalLabel_, total.str().c_str());
     SetWindowTextW(leastLabel_, leastText.str().c_str());
     SetWindowTextW(imbalanceLabel_, imbalance.str().c_str());
-    std::wstring modeText = L"Current movement mode: ";
+    std::wstring modeText = L"Movement: ";
     modeText += modeName(mode_);
     SetWindowTextW(modeLabel_, modeText.c_str());
 }
@@ -261,10 +226,31 @@ void StatisticsWindow::paintHeatmap(HDC dc, const RECT&) {
     if (!map) map = &empty;
     double maximum = 0.0;
     for (double value : map->seconds) maximum = std::max(maximum, value);
-    const int heatmapWidth = static_cast<int>(heatmapRect_.right - heatmapRect_.left);
-    const int heatmapHeight = static_cast<int>(heatmapRect_.bottom - heatmapRect_.top);
-    const int cellWidth = std::max(1, heatmapWidth / static_cast<int>(core::kExposureColumns));
-    const int cellHeight = std::max(1, heatmapHeight / static_cast<int>(core::kExposureRows));
+    const int axisWidth = scale(28);
+    const int axisHeight = scale(20);
+    const RECT grid{heatmapRect_.left + axisWidth, heatmapRect_.top + axisHeight,
+                    heatmapRect_.right, heatmapRect_.bottom};
+    const int heatmapWidth = std::max(1, static_cast<int>(grid.right - grid.left));
+    const int heatmapHeight = std::max(1, static_cast<int>(grid.bottom - grid.top));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+    const HGDIOBJ previousFont = controlFont_ ? SelectObject(dc, controlFont_.get()) : nullptr;
+    for (std::size_t column = 0; column < core::kExposureColumns; ++column) {
+        RECT label{grid.left + static_cast<int>(column) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                   heatmapRect_.top,
+                   grid.left + static_cast<int>(column + 1) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                   grid.top};
+        const std::wstring text = std::to_wstring(column + 1);
+        DrawTextW(dc, text.c_str(), -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    for (std::size_t row = 0; row < core::kExposureRows; ++row) {
+        RECT label{heatmapRect_.left,
+                   grid.top + static_cast<int>(row) * heatmapHeight / static_cast<int>(core::kExposureRows),
+                   grid.left - scale(5),
+                   grid.top + static_cast<int>(row + 1) * heatmapHeight / static_cast<int>(core::kExposureRows)};
+        const std::wstring text = std::to_wstring(row + 1);
+        DrawTextW(dc, text.c_str(), -1, &label, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
     for (std::size_t row = 0; row < core::kExposureRows; ++row) {
         for (std::size_t column = 0; column < core::kExposureColumns; ++column) {
             const double intensity = maximum <= 0.0 ? 0.0 : map->cell(column, row) / maximum;
@@ -272,16 +258,17 @@ void StatisticsWindow::paintHeatmap(HDC dc, const RECT&) {
             const BYTE green = static_cast<BYTE>(std::clamp(170.0 - intensity * 125.0, 0.0, 255.0));
             const BYTE blue = static_cast<BYTE>(std::clamp(225.0 - intensity * 155.0, 0.0, 255.0));
             const COLORREF color = RGB(red, green, blue);
-            RECT cell{heatmapRect_.left + static_cast<int>(column) * cellWidth,
-                      heatmapRect_.top + static_cast<int>(row) * cellHeight,
-                      heatmapRect_.left + static_cast<int>(column + 1) * cellWidth,
-                      heatmapRect_.top + static_cast<int>(row + 1) * cellHeight};
+            RECT cell{grid.left + static_cast<int>(column) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                      grid.top + static_cast<int>(row) * heatmapHeight / static_cast<int>(core::kExposureRows),
+                      grid.left + static_cast<int>(column + 1) * heatmapWidth / static_cast<int>(core::kExposureColumns),
+                      grid.top + static_cast<int>(row + 1) * heatmapHeight / static_cast<int>(core::kExposureRows)};
             HBRUSH brush = CreateSolidBrush(color);
             FillRect(dc, &cell, brush);
             DeleteObject(brush);
             FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
     }
+    if (previousFont) SelectObject(dc, previousFont);
 }
 
 LRESULT CALLBACK StatisticsWindow::windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -305,6 +292,8 @@ LRESULT StatisticsWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPar
             if (monitor && GetMonitorInfoW(monitor, &info)) {
                 limits->ptMaxTrackSize.x = info.rcWork.right - info.rcWork.left;
                 limits->ptMaxTrackSize.y = info.rcWork.bottom - info.rcWork.top;
+                limits->ptMinTrackSize.x = std::min<LONG>(scale(520), limits->ptMaxTrackSize.x);
+                limits->ptMinTrackSize.y = std::min<LONG>(scale(420), limits->ptMaxTrackSize.y);
             }
         }
         return 0;
@@ -312,18 +301,14 @@ LRESULT StatisticsWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPar
     case WM_DPICHANGED: {
         dpi_ = HIWORD(wParam);
         if (dpi_ == 0) dpi_ = 96;
-        if (controlFont_) {
-            DeleteObject(controlFont_);
-            controlFont_ = CreateFontW(-scale(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-            for (HWND control : {monitorCombo_, totalLabel_, leastLabel_, imbalanceLabel_, modeLabel_, resetButton_, exportButton_, closeButton_}) {
-                if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(controlFont_), TRUE);
-            }
+        UniqueGdiFont nextFont(createControlFont(dpi_));
+        if (nextFont) {
+            for (HWND control : controls_) setControlFont(control, nextFont.get());
+            controlFont_ = std::move(nextFont);
         }
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         if (suggested) {
-            const RECT fitted = fitToWorkArea(*suggested);
+            const RECT fitted = aoc::platform::fitToWorkArea(*suggested);
             SetWindowPos(hwnd_, nullptr, fitted.left, fitted.top,
                          fitted.right - fitted.left, fitted.bottom - fitted.top,
                                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -338,6 +323,12 @@ LRESULT StatisticsWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lPar
     case WM_SIZE:
         layoutControls(LOWORD(lParam), HIWORD(lParam));
         return 0;
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
     case WM_COMMAND: {
         const int id = LOWORD(wParam);
         const int notification = HIWORD(wParam);

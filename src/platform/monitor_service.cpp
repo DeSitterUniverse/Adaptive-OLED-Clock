@@ -34,16 +34,23 @@ BOOL CALLBACK monitorCallback(HMONITOR monitor, HDC, LPRECT, LPARAM data) {
     info.workAreaPx = {monitorInfo.rcWork.left, monitorInfo.rcWork.top,
                        monitorInfo.rcWork.right, monitorInfo.rcWork.bottom};
     info.primary = (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
-    DISPLAY_DEVICEW displayDevice{sizeof(DISPLAY_DEVICEW)};
-    for (DWORD index = 0; EnumDisplayDevicesW(nullptr, index, &displayDevice, 0); ++index) {
-        if (wcscmp(displayDevice.DeviceName, monitorInfo.szDevice) == 0) {
-            info.stableKey = utf8(displayDevice.DeviceID);
-            break;
-        }
-        displayDevice = DISPLAY_DEVICEW{sizeof(DISPLAY_DEVICEW)};
+    // Query the monitor attached to this GDI display, not the display adapter.
+    // EDD_GET_DEVICE_INTERFACE_NAME returns the per-monitor device-interface
+    // path, which remains distinct when several panels share one GPU.
+    DISPLAY_DEVICEW monitorDevice{sizeof(DISPLAY_DEVICEW)};
+    if (EnumDisplayDevicesW(monitorInfo.szDevice, 0, &monitorDevice,
+                            EDD_GET_DEVICE_INTERFACE_NAME) != FALSE) {
+        info.stableKey = utf8(monitorDevice.DeviceID);
+        if (monitorDevice.DeviceString[0] != L'\0') info.displayName = monitorDevice.DeviceString;
     }
     if (info.stableKey.empty()) {
-        info.stableKey = utf8(monitorInfo.szDevice);
+        // Topology names are a fallback only. Include geometry to prevent two
+        // active monitors from ever sharing one exposure map.
+        info.stableKey = utf8(monitorInfo.szDevice) + "@" +
+                         std::to_string(info.boundsPx.left) + "," +
+                         std::to_string(info.boundsPx.top) + "," +
+                         std::to_string(info.boundsPx.right) + "," +
+                         std::to_string(info.boundsPx.bottom);
     }
     UINT dpiX = 96;
     UINT dpiY = 96;

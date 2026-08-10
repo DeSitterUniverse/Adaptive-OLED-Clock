@@ -1,6 +1,6 @@
 # Adaptive OLED Clock
 
-Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keeps the current time visible in a transparent, click-through overlay while varying the clock's position so that exposure is not concentrated in one fixed area of the screen. The application is written in C++20 with Win32, Direct2D, and DirectWrite, and has no web, network, or telemetry dependency.
+Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keeps the current time visible in a transparent, click-through overlay while varying the clock's position so that exposure is not concentrated in one fixed area of the screen. The application is written in C++20 with Win32, Direct2D, and DirectWrite. The app aims to be minimal and performant. I created this app so I could have the time always up while also auto-hiding my taskbar, but it's good for anyone who wants to have a customizable digital clock on OLED monitors with user-adjustable mitigations for burn in,
 
 ## Features
 
@@ -8,8 +8,8 @@ Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keep
 - Locale-derived, 12-hour, or 24-hour time; optional AM/PM, seconds, and locale-formatted date.
 - Configurable font family, weight, size, text color, and normal opacity.
 - Temporary brightness from the tray or settings, with a configurable boost opacity and automatic restoration.
-- Exposure-balanced macro movement with an edge-only default profile: 45% normal opacity, 5-minute major moves, enabled 8 DIP minute micro-shifts, and a 24 DIP edge margin. Whole-screen movement and local wander are also available.
-- Allowed movement areas, excluded rectangles, edge margins, monitor selection, and manual positioning controls.
+- Slow scheduled movement with an edge-only default profile: white at 80% opacity, one move per hour, three 3 px small shifts, and no gap from the screen edge. Four-corners, whole-screen, and anchored local-area modes are also available.
+- Hours, minutes, and seconds for any positive movement interval supported by the settings format, plus allowed movement area, edge gap, monitor selection, and manual positioning controls.
 - Independent 12-by-8 exposure history for each recognized monitor.
 - Exposure heatmaps and summary statistics, with reset and CSV export actions.
 - Fullscreen hiding plus handling for monitor changes, DPI changes, time and time-zone changes, display power, lock/unlock, and sleep/resume.
@@ -17,23 +17,21 @@ Adaptive OLED Clock is a native Windows desktop clock for OLED displays. It keep
 - Single-instance behavior, tray recovery, atomic local persistence, and corruption recovery for local data.
 - No telemetry, network calls, account, or remote synchronization.
 
-## OLED protection model
+## Movement model
 
 The clock uses a small, practical exposure model rather than a panel-specific lifetime prediction:
 
 1. Each monitor is represented by a 12-by-8 grid.
 2. While the clock is visible and the display/session policy allows charging, each visible interval is added to the cells covered by the clock. Cells receive exposure in proportion to the clock rectangle's overlap with them.
-3. When the clock moves, candidate positions are scored using accumulated exposure, recent-position penalties, movement rules, allowed areas, and exclusions. The default edge-only mode keeps candidates around the usable screen perimeter; whole-screen and local-wander modes are available when preferred.
+3. When the clock moves, its selected movement mode defines the possible positions. Recent positions are avoided first; saved screen-use history is only a gentle tie-breaker. The default edge-only mode keeps the clock around the usable screen perimeter.
 
-The history is maintained independently for each monitor identity, so one display's exposure does not affect another display's placement decisions. Bounded micro-shifts add small movement between larger moves without making the clock unpredictable.
+History is maintained independently for each physical monitor, so one display does not affect another display's placement decisions. The configured number of optional small shifts is divided evenly across each major-movement interval. Second-by-second clock redraws never invoke placement. Position clock stores an anchor only for Local area; it is not a global startup position.
 
 ## Requirements
 
 - A 64-bit Windows desktop environment.
 - CMake and a C++20-capable Visual Studio/MSVC toolchain for building.
 - Windows' built-in Win32, Direct2D, and DirectWrite components.
-
-The application itself does not require a web server, scripting runtime, third-party UI framework, or network service.
 
 ## Building
 
@@ -56,20 +54,19 @@ Run `build\Release\adaptive_oled_clock.exe`. The application stays in the Window
 
 The clock responds to real minute boundaries and relevant Windows events. It hides during detected fullscreen use when that setting is enabled, pauses exposure charging when the display is off or the session is locked, and re-evaluates its monitor, DPI, position, and time display after system changes.
 
-Use the tray menu to show or hide the clock, activate temporary brightness, choose a movement mode or opacity preset, open Settings or Exposure Statistics, start drag-to-position mode, or exit. In drag-to-position mode, the overlay becomes temporarily interactive and stores the resulting position when positioning ends.
+Use the tray menu to show or hide the clock, activate temporary brightness, choose a movement mode or opacity preset, open Settings or Movement History, start drag-to-position mode, or exit. Drag-to-position also sets the center used by Local area without creating a global startup position.
 
 A second launch hands off to the existing instance and opens Settings instead of creating another clock. If Windows Explorer restarts, the application recreates its notification-area icon.
 
 ## Settings and tray basics
 
-The Settings window groups controls into four areas:
+The Settings window groups controls into three areas:
 
 - **Clock** — time format, AM/PM, seconds, date, font family, font weight, font size, color, normal opacity, and temporary brightness values.
-- **Movement & OLED** — movement interval, edge-only/whole-screen/local-wander mode, micro-shift bounds, edge margin, allowed area, and excluded areas.
+- **Movement** — hours/minutes/seconds between scheduled moves, optional small-shift count and distance, edge-only/four-corners/whole-screen/local-area mode, the Local area radius, screen-edge gap, and allowed area.
 - **Display & Windows** — follow-primary or fixed-monitor selection, fullscreen hiding, startup registration, and the global hotkey.
-- **Statistics** — an explanation of how exposure is charged and an **Open statistics** action. This action opens a separate Exposure Statistics window with a monitor selector, the selected monitor's 12-by-8 heatmap, charged exposure summary, least/most exposed cells, imbalance information, reset, and CSV export.
 
-Settings and exposure history are saved automatically. The tray menu also provides quick access to the most common visibility, brightness, movement, opacity, positioning, and statistics actions.
+Settings remain unchanged until **Apply** is selected. **Movement history** at the bottom opens the separate monitor history window, where history can be viewed, cleared, or exported as CSV. Movement history itself is checkpointed periodically and when the app closes.
 
 ## Data and privacy
 
@@ -87,7 +84,7 @@ The directory contains:
 
 The application does not transmit this data or make network requests. Writes use a temporary sibling file and replacement so an interrupted write can be recovered safely. Invalid existing data is quarantined before defaults are used.
 
-## Architecture for contributors
+## Architecture
 
 The project separates platform-independent clock and placement logic from the Windows host:
 
@@ -96,17 +93,9 @@ The project separates platform-independent clock and placement logic from the Wi
 - The overlay is rendered with Direct2D and DirectWrite into a premultiplied bitmap and presented as a layered window with `UpdateLayeredWindow`.
 - Exposure coordinates are normalized to each monitor, while rendering and DPI-aware placement use physical pixels and device-independent units as appropriate.
 
-There are no third-party or web-runtime dependencies in the application architecture.
-
-## Limitations and safety disclaimer
+## Limitations
 
 Adaptive OLED Clock is an exposure-balancing heuristic, not a burn-in prevention system or a guarantee of panel longevity. It does not model the physical aging characteristics of a particular OLED panel, measure per-pixel wear, or guarantee uniform exposure. The 12-by-8 history is intentionally coarse, and monitor identity can change when Windows reports a display differently.
-
-Use the application's settings together with the display manufacturer's care guidance and normal power-management practices. The software is provided for convenience and should not be treated as a substitute for those controls.
-
-## Contributing
-
-Keep changes focused on the native Windows application and preserve the separation between `aoc_core` and the Win32 host. For a change, describe the user-visible behavior, affected Windows events or settings, and any compatibility considerations. Build the x64 Release configuration before sharing the change.
 
 ## License
 

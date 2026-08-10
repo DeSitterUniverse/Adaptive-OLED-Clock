@@ -41,6 +41,10 @@ private:
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dcRenderTarget_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> instructionFormat_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> textBrush_;
+    std::wstring cachedFontFamily_;
+    core::FontWeight cachedFontWeight_{core::FontWeight::Normal};
+    double cachedFontSizeDip_{0.0};
     HDC memoryDc_{nullptr};
     HBITMAP bitmap_{nullptr};
     HBITMAP oldBitmap_{nullptr};

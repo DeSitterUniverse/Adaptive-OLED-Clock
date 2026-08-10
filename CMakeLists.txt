@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(AdaptiveOledClockCpp VERSION 1.0.0 LANGUAGES CXX)
+project(AdaptiveOledClockCpp VERSION 1.0.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,8 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(aoc_core STATIC
     src/core/types.cpp
+    src/core/color.cpp
     src/core/geometry.cpp
     src/core/settings.cpp
+    src/core/settings_change.cpp
     src/core/clock.cpp
     src/core/exposure.cpp
     src/core/placement.cpp
@@ -24,6 +26,7 @@ if (MSVC)
 endif()
 
 add_executable(adaptive_oled_clock WIN32
+    resources/app.rc
     src/main.cpp
     src/platform/app.cpp
     src/platform/persistence.cpp
@@ -33,10 +36,12 @@ add_executable(adaptive_oled_clock WIN32
     src/platform/monitor_service.cpp
     src/platform/fullscreen_service.cpp
     src/platform/startup.cpp
+    src/platform/win32_ui.cpp
     src/platform/settings_window.cpp
+    src/platform/color_picker_window.cpp
     src/platform/statistics_window.cpp
 )
-target_include_directories(adaptive_oled_clock PRIVATE include)
+target_include_directories(adaptive_oled_clock PRIVATE include resources)
 target_compile_definitions(adaptive_oled_clock PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(adaptive_oled_clock PRIVATE
     aoc_core
@@ -52,10 +57,15 @@ target_link_libraries(adaptive_oled_clock PRIVATE
     shcore
     shell32
     user32
+    uxtheme
     wtsapi32
 )
 if (MSVC)
     target_compile_options(adaptive_oled_clock PRIVATE /W4 /permissive- /utf-8)
+    # The application manifest is embedded by resources/app.rc so the visual-
+    # styles dependency is deterministic and does not collide with MSVC's
+    # generated default manifest.
+    target_link_options(adaptive_oled_clock PRIVATE /MANIFEST:NO)
 endif()
 
 enable_testing()

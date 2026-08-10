@@ -49,14 +49,6 @@ double iou(const RectI& first, const RectI& second) {
     return unionArea <= 0.0 ? 0.0 : overlapArea / unionArea;
 }
 
-double proximityPenalty(const RectI& candidate, const RectI& previous) {
-    const PointD currentCenter = candidate.center();
-    const PointD previousCenter = previous.center();
-    const double distance = std::hypot(currentCenter.x - previousCenter.x, currentCenter.y - previousCenter.y);
-    const double scale = std::max(1.0, std::hypot(candidate.width(), candidate.height()));
-    return std::exp(-distance / (scale * 2.5)) * 70.0;
-}
-
 } // namespace
 
 RectI paddedPlacementRect(const RectI& candidate, double paddingDip, std::uint32_t dpi) noexcept {
@@ -70,10 +62,20 @@ bool isValidPlacement(const RectI& candidate, const PlacementContext& context) {
     const RectI bounds = movementBounds(context);
     const RectI surface = paddedPlacementRect(candidate, context.surfacePaddingDip, context.dpi);
     if (!candidate.isValid() || !surface.isValid() || !bounds.contains(surface)) return false;
-    for (const NormalizedRect& exclusion : context.excludedAreas) {
-        if (surface.intersects(normalizedToPhysicalPixels(exclusion, context.monitorBoundsPx))) return false;
-    }
     return true;
+}
+
+RectI fitPlacementNear(const RectI& desired, const PlacementContext& context) noexcept {
+    if (!desired.isValid()) return {};
+    const RectI bounds = movementBounds(context);
+    const int padding = std::max(0, static_cast<int>(std::lround(dipToPixels(context.surfacePaddingDip,
+                                                                             context.dpi))));
+    const RectI surface = paddedPlacementRect(desired, context.surfacePaddingDip, context.dpi);
+    const RectI fittedSurface = clampRectTo(surface, bounds);
+    if (!fittedSurface.isValid()) return {};
+    const RectI fitted{fittedSurface.left + padding, fittedSurface.top + padding,
+                       fittedSurface.right - padding, fittedSurface.bottom - padding};
+    return isValidPlacement(fitted, context) ? fitted : RectI{};
 }
 
 std::vector<RectI> generateCandidates(const PlacementContext& context) {
@@ -90,7 +92,12 @@ std::vector<RectI> generateCandidates(const PlacementContext& context) {
         if (isValidPlacement(candidate, context)) result.push_back(candidate);
     };
 
-    if (context.mode == MovementMode::EdgeOnly) {
+    if (context.mode == MovementMode::FourCorners) {
+        addCenter({minCenterX, minCenterY});
+        addCenter({maxCenterX, minCenterY});
+        addCenter({minCenterX, maxCenterY});
+        addCenter({maxCenterX, maxCenterY});
+    } else if (context.mode == MovementMode::EdgeOnly) {
         // Edge-only deliberately samples the perimeter after margins and padding; there are no interior anchors.
         constexpr int samples = 17;
         for (int index = 0; index < samples; ++index) {
@@ -113,31 +120,29 @@ std::vector<RectI> generateCandidates(const PlacementContext& context) {
             }
         }
     } else {
-        const PointD preferred = context.preferredCenter.has_value()
-                                     ? normalizedPointToPhysical(*context.preferredCenter, context.monitorBoundsPx)
-                                     : bounds.center();
-        const double stepX = std::max(size.width * 1.35, 18.0);
-        const double stepY = std::max(size.height * 1.35, 18.0);
-        for (int row = -4; row <= 4; ++row) {
-            for (int column = -5; column <= 5; ++column) {
-                const double x = preferred.x + column * stepX;
-                const double y = preferred.y + row * stepY;
-                if (x >= minCenterX - size.width && x <= maxCenterX + size.width &&
-                    y >= minCenterY - size.height && y <= maxCenterY + size.height) {
-                    addCenter({x, y});
-                }
+        // Local mode is a fixed pixel region around the position selected with
+        // Position clock. Without an explicit anchor it starts at the middle of
+        // the allowed area. Candidate centres are clipped at the usable border.
+        const PointD requested = context.localAnchorPx.value_or(bounds.center());
+        const PointD preferred{std::clamp(requested.x, minCenterX, maxCenterX),
+                               std::clamp(requested.y, minCenterY, maxCenterY)};
+        const double radius = static_cast<double>(std::max(1, context.localRadiusPx));
+        const double minLocalX = std::max(minCenterX, preferred.x - radius);
+        const double maxLocalX = std::min(maxCenterX, preferred.x + radius);
+        const double minLocalY = std::max(minCenterY, preferred.y - radius);
+        const double maxLocalY = std::min(maxCenterY, preferred.y + radius);
+        constexpr int columns = 7;
+        constexpr int rows = 7;
+        for (int row = 0; row < rows; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                const double x = minLocalX + (maxLocalX - minLocalX) * column / (columns - 1);
+                const double y = minLocalY + (maxLocalY - minLocalY) * row / (rows - 1);
+                addCenter({x, y});
             }
         }
         addCenter(preferred);
     }
     return deduplicate(std::move(result));
-}
-
-std::optional<RectI> preferredPlacement(const PlacementContext& context) {
-    if (!context.preferredCenter.has_value()) return std::nullopt;
-    const SizeD size = clockSizePx(context);
-    const RectI candidate = centeredAt(normalizedPointToPhysical(*context.preferredCenter, context.monitorBoundsPx), size);
-    return isValidPlacement(candidate, context) ? std::optional<RectI>(candidate) : std::nullopt;
 }
 
 std::optional<PlacementCandidate> choosePlacement(const PlacementContext& context,
@@ -154,7 +159,10 @@ std::optional<PlacementCandidate> choosePlacement(const PlacementContext& contex
         double recentPenalty = 0.0;
         const auto addHistoryPenalty = [&](const RectI& previous, double weight) {
             const double overlap = iou(candidate, previous);
-            recentPenalty += weight * (overlap * 520.0 + proximityPenalty(candidate, previous));
+            // Avoid repeats and overlap without rewarding the farthest point.
+            // A distance reward caused Whole screen to bounce among edges and
+            // corners even though its candidate grid contained the interior.
+            recentPenalty += weight * overlap * 520.0;
             if (candidate == previous) recentPenalty += weight * 5000.0;
         };
         if (context.previousRectPx.has_value()) addHistoryPenalty(*context.previousRectPx, 1.0);
@@ -162,7 +170,10 @@ std::optional<PlacementCandidate> choosePlacement(const PlacementContext& contex
             const double weight = 1.0 / static_cast<double>(index + 1);
             addHistoryPenalty(context.recentMacroRects[index], weight);
         }
-        const double score = exposureScore + recentPenalty + random(generator) * 0.03;
+        // Exposure is a gentle tie-breaker, not an ever-growing force that can
+        // override movement cadence and recent-position avoidance after long use.
+        const double exposurePenalty = std::log1p(std::max(0.0, exposureScore)) * 0.35;
+        const double score = exposurePenalty + recentPenalty + random(generator);
         if (!best.has_value() || score < best->score) {
             best = PlacementCandidate{candidate, exposureScore, score};
         }
@@ -172,23 +183,6 @@ std::optional<PlacementCandidate> choosePlacement(const PlacementContext& contex
         best = PlacementCandidate{candidate, exposure.weightedExposure(physicalToNormalized(candidate, context.monitorBoundsPx)), 0.0};
     }
     return best;
-}
-
-RectI applyBoundedMicroShift(const RectI& currentRect,
-                             const RectI& macroAnchorRect,
-                             double radiusDip,
-                             std::uint32_t dpi,
-                             std::uint64_t randomSeed) noexcept {
-    if (!currentRect.isValid()) return {};
-    const RectI origin = macroAnchorRect.isValid() ? macroAnchorRect : currentRect;
-    const int radius = std::max(0, static_cast<int>(std::lround(dipToPixels(std::max(0.0, radiusDip), dpi))));
-    if (radius == 0) return origin;
-    std::mt19937_64 generator(randomSeed);
-    std::uniform_int_distribution<int> offset(-radius, radius);
-    const int dx = offset(generator);
-    const int dy = offset(generator);
-    return {origin.left + dx, origin.top + dy,
-            origin.right + dx, origin.bottom + dy};
 }
 
 } // namespace aoc::core

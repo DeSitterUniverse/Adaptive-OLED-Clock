@@ -8,9 +8,9 @@
 namespace aoc::core {
 
 struct Color {
-    std::uint8_t r{176};
-    std::uint8_t g{176};
-    std::uint8_t b{176};
+    std::uint8_t r{255};
+    std::uint8_t g{255};
+    std::uint8_t b{255};
     std::uint8_t a{255};
 
     friend bool operator==(const Color&, const Color&) = default;
@@ -93,6 +93,7 @@ enum class MovementMode : std::uint8_t {
     WholeScreen = 0,
     LocalWander = 1,
     EdgeOnly = 2,
+    FourCorners = 3,
 };
 
 enum class FontWeight : std::uint8_t {

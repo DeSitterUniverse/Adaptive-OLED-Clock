@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string_view>
@@ -95,19 +96,25 @@ bool parseRect(std::string_view text, NormalizedRect& rect) {
     return rect.isValid();
 }
 
-bool parsePoint(std::string_view text, NormalizedPoint& point) {
-    std::stringstream stream{std::string(text)};
-    char comma = 0;
-    if (!(stream >> point.x >> comma >> point.y) || comma != ',' ||
-        !std::isfinite(point.x) || !std::isfinite(point.y)) {
-        return false;
-    }
-    return true;
-}
-
 std::string rectText(const NormalizedRect& rect) {
     std::ostringstream stream;
     stream << std::setprecision(17) << rect.left << ',' << rect.top << ',' << rect.right << ',' << rect.bottom;
+    return stream.str();
+}
+
+bool parsePoint(std::string_view text, NormalizedPoint& point) {
+    std::stringstream stream{std::string(text)};
+    char comma = 0;
+    if (!(stream >> point.x >> comma) || comma != ',' || !(stream >> point.y) ||
+        !std::isfinite(point.x) || !std::isfinite(point.y)) return false;
+    point.x = clamp01(point.x);
+    point.y = clamp01(point.y);
+    return true;
+}
+
+std::string pointText(const NormalizedPoint& point) {
+    std::ostringstream stream;
+    stream << std::setprecision(17) << point.x << ',' << point.y;
     return stream.str();
 }
 
@@ -195,36 +202,41 @@ Settings Settings::defaults() {
     settings.fontFamily = "Segoe UI";
     settings.fontWeight = FontWeight::Normal;
     settings.fontSizeDip = 32.0;
-    settings.textColor = {176, 176, 176, 255};
-    settings.opacity = 0.45;
-    settings.movementIntervalMinutes = 5;
+    settings.textColor = {255, 255, 255, 255};
+    settings.opacity = 0.80;
+    settings.movementIntervalSeconds = 3600;
     settings.movementMode = MovementMode::EdgeOnly;
     settings.microShiftEnabled = true;
-    settings.microShiftRadiusDip = 8.0;
+    settings.microShiftCount = 3;
+    settings.microShiftDistancePx = 3;
+    settings.localAreaRadiusPx = 100;
+    settings.localAreaAnchor = {0.5, 0.5};
+    settings.localAreaAnchorSet = false;
     settings.allowedArea = {0.0, 0.0, 1.0, 1.0};
-    settings.excludedAreas.clear();
-    settings.edgeMarginDip = 24.0;
+    settings.edgeMarginDip = 0.0;
     settings.monitorMode = MonitorMode::FollowPrimary;
     settings.fixedMonitorKey.clear();
-    settings.preferredPosition = {0.5, 0.5};
-    settings.preferredPositionEnabled = false;
     settings.hideInFullscreen = true;
     settings.launchAtStartup = false;
     settings.hotkeyEnabled = true;
     settings.clockVisible = true;
-    settings.boostOpacity = 0.85;
+    settings.boostOpacity = 1.0;
     settings.boostDurationSeconds = 15;
     return settings;
 }
 
-Settings Settings::oledSafePreset() {
+Settings Settings::oledPreset() {
     Settings settings = defaults();
-    settings.opacity = 0.31;
-    settings.boostOpacity = 0.70;
+    settings.textColor = {176, 176, 176, 255};
+    settings.opacity = 0.50;
+    settings.boostOpacity = 1.0;
     settings.boostDurationSeconds = 10;
-    settings.movementIntervalMinutes = 5;
-    settings.microShiftRadiusDip = 6.0;
-    settings.edgeMarginDip = 32.0;
+    settings.movementIntervalSeconds = 30 * 60;
+    settings.movementMode = MovementMode::EdgeOnly;
+    settings.microShiftEnabled = true;
+    settings.microShiftCount = 4;
+    settings.microShiftDistancePx = 5;
+    settings.edgeMarginDip = 0.0;
     return settings;
 }
 
@@ -239,7 +251,7 @@ void Settings::validateAndNormalize() noexcept {
         fontWeight = FontWeight::Normal;
     }
     if (static_cast<int>(movementMode) < static_cast<int>(MovementMode::WholeScreen) ||
-        static_cast<int>(movementMode) > static_cast<int>(MovementMode::EdgeOnly)) {
+        static_cast<int>(movementMode) > static_cast<int>(MovementMode::FourCorners)) {
         movementMode = MovementMode::EdgeOnly;
     }
     if (static_cast<int>(monitorMode) < static_cast<int>(MonitorMode::FollowPrimary) ||
@@ -247,27 +259,28 @@ void Settings::validateAndNormalize() noexcept {
         monitorMode = MonitorMode::FollowPrimary;
     }
     if (!std::isfinite(fontSizeDip)) fontSizeDip = 32.0;
-    if (!std::isfinite(opacity)) opacity = 0.45;
-    if (!std::isfinite(boostOpacity)) boostOpacity = 0.85;
-    if (!std::isfinite(microShiftRadiusDip)) microShiftRadiusDip = 8.0;
-    if (!std::isfinite(edgeMarginDip)) edgeMarginDip = 24.0;
+    if (!std::isfinite(opacity)) opacity = 0.80;
+    if (!std::isfinite(boostOpacity)) boostOpacity = 1.0;
+    if (!std::isfinite(edgeMarginDip)) edgeMarginDip = 0.0;
     fontSizeDip = std::clamp(fontSizeDip, 8.0, 128.0);
     opacity = std::clamp(opacity, 0.0, 1.0);
     boostOpacity = std::clamp(boostOpacity, 0.0, 1.0);
-    microShiftRadiusDip = std::clamp(microShiftRadiusDip, 0.0, 64.0);
     edgeMarginDip = std::clamp(edgeMarginDip, 0.0, 500.0);
-    movementIntervalMinutes = std::clamp(movementIntervalMinutes, 1, 120);
+    // One second is the only semantic lower bound. The integer storage limit
+    // (roughly 68 years) replaces the former arbitrary seven-day ceiling.
+    movementIntervalSeconds = std::max(1, movementIntervalSeconds);
+    microShiftCount = std::clamp(microShiftCount, 1, 100);
+    microShiftDistancePx = std::clamp(microShiftDistancePx, 1, 100);
+    localAreaRadiusPx = std::clamp(localAreaRadiusPx, 1, 10000);
+    if (!std::isfinite(localAreaAnchor.x) || !std::isfinite(localAreaAnchor.y)) {
+        localAreaAnchor = {0.5, 0.5};
+        localAreaAnchorSet = false;
+    }
+    localAreaAnchor.x = clamp01(localAreaAnchor.x);
+    localAreaAnchor.y = clamp01(localAreaAnchor.y);
     boostDurationSeconds = std::clamp(boostDurationSeconds, 1, 300);
     allowedArea = clampNormalizedRect(allowedArea);
     if (!allowedArea.isValid()) allowedArea = {0.0, 0.0, 1.0, 1.0};
-    std::vector<NormalizedRect> validExclusions;
-    for (auto exclusion : excludedAreas) {
-        exclusion = clampNormalizedRect(exclusion);
-        if (exclusion.isValid()) validExclusions.push_back(exclusion);
-    }
-    excludedAreas = std::move(validExclusions);
-    preferredPosition.x = clamp01(preferredPosition.x);
-    preferredPosition.y = clamp01(preferredPosition.y);
     if (fontFamily.empty()) fontFamily = "Segoe UI";
     if (fontFamily.size() > 128) fontFamily.resize(128);
     if (fixedMonitorKey.size() > 512) fixedMonitorKey.resize(512);
@@ -291,22 +304,18 @@ std::string serializeSettings(const Settings& input) {
            << static_cast<int>(settings.textColor.g) << ',' << static_cast<int>(settings.textColor.b) << ','
            << static_cast<int>(settings.textColor.a) << '\n'
            << "opacity=" << settings.opacity << '\n'
-           << "movementIntervalMinutes=" << settings.movementIntervalMinutes << '\n'
+           << "movementIntervalSeconds=" << settings.movementIntervalSeconds << '\n'
            << "movementMode=" << static_cast<int>(settings.movementMode) << '\n'
            << "microShiftEnabled=" << (settings.microShiftEnabled ? 1 : 0) << '\n'
-           << "microShiftRadiusDip=" << settings.microShiftRadiusDip << '\n'
+           << "microShiftCount=" << settings.microShiftCount << '\n'
+           << "microShiftDistancePx=" << settings.microShiftDistancePx << '\n'
+           << "localAreaRadiusPx=" << settings.localAreaRadiusPx << '\n'
+           << "localAreaAnchor=" << pointText(settings.localAreaAnchor) << '\n'
+           << "localAreaAnchorSet=" << (settings.localAreaAnchorSet ? 1 : 0) << '\n'
            << "allowedArea=" << rectText(settings.allowedArea) << '\n'
-           << "excludedAreas=";
-    for (std::size_t index = 0; index < settings.excludedAreas.size(); ++index) {
-        if (index != 0) output << ';';
-        output << rectText(settings.excludedAreas[index]);
-    }
-    output << '\n'
            << "edgeMarginDip=" << settings.edgeMarginDip << '\n'
            << "monitorMode=" << static_cast<int>(settings.monitorMode) << '\n'
            << "fixedMonitorKey=" << escapeValue(settings.fixedMonitorKey) << '\n'
-           << "preferredPosition=" << settings.preferredPosition.x << ',' << settings.preferredPosition.y << '\n'
-           << "preferredPositionEnabled=" << (settings.preferredPositionEnabled ? 1 : 0) << '\n'
            << "hideInFullscreen=" << (settings.hideInFullscreen ? 1 : 0) << '\n'
            << "launchAtStartup=" << (settings.launchAtStartup ? 1 : 0) << '\n'
            << "hotkeyEnabled=" << (settings.hotkeyEnabled ? 1 : 0) << '\n'
@@ -366,30 +375,41 @@ SettingsLoadResult deserializeSettings(const std::string& text) {
         if (!parseColor(found->second, settings.textColor)) invalid = true;
     }
     readNumber(properties, "opacity", settings.opacity, invalid);
-    readNumber(properties, "movementIntervalMinutes", settings.movementIntervalMinutes, invalid);
+    const bool hasIntervalSeconds = properties.contains("movementIntervalSeconds");
+    readNumber(properties, "movementIntervalSeconds", settings.movementIntervalSeconds, invalid);
+    int legacyIntervalMinutes = 0;
+    if (!hasIntervalSeconds && properties.contains("movementIntervalMinutes")) {
+        readNumber(properties, "movementIntervalMinutes", legacyIntervalMinutes, invalid);
+        if (legacyIntervalMinutes > 0 &&
+            legacyIntervalMinutes <= std::numeric_limits<int>::max() / 60) {
+            settings.movementIntervalSeconds = legacyIntervalMinutes * 60;
+        } else {
+            invalid = true;
+        }
+    }
     if (const auto found = properties.find("movementMode"); found != properties.end()) {
         if (parseInt(found->second, integer)) settings.movementMode = static_cast<MovementMode>(integer);
         else invalid = true;
     }
     readBool(properties, "microShiftEnabled", settings.microShiftEnabled, invalid);
-    readNumber(properties, "microShiftRadiusDip", settings.microShiftRadiusDip, invalid);
+    readNumber(properties, "microShiftCount", settings.microShiftCount, invalid);
+    readNumber(properties, "microShiftDistancePx", settings.microShiftDistancePx, invalid);
+    readNumber(properties, "localAreaRadiusPx", settings.localAreaRadiusPx, invalid);
+    if (const auto found = properties.find("localAreaAnchor"); found != properties.end()) {
+        if (!parsePoint(found->second, settings.localAreaAnchor)) invalid = true;
+    }
+    readBool(properties, "localAreaAnchorSet", settings.localAreaAnchorSet, invalid);
+    if (const auto legacyRadius = properties.find("microShiftRadiusDip");
+        legacyRadius != properties.end() && properties.find("microShiftDistancePx") == properties.end()) {
+        double radius = static_cast<double>(settings.microShiftDistancePx);
+        if (parseDouble(legacyRadius->second, radius)) {
+            settings.microShiftDistancePx = static_cast<int>(std::lround(radius));
+        } else {
+            invalid = true;
+        }
+    }
     if (const auto found = properties.find("allowedArea"); found != properties.end()) {
         if (!parseRect(found->second, settings.allowedArea)) invalid = true;
-    }
-    if (const auto found = properties.find("excludedAreas"); found != properties.end()) {
-        settings.excludedAreas.clear();
-        if (!found->second.empty()) {
-            std::stringstream exclusions(found->second);
-            std::string item;
-            while (std::getline(exclusions, item, ';')) {
-                NormalizedRect rect;
-                if (!parseRect(item, rect)) {
-                    invalid = true;
-                    break;
-                }
-                settings.excludedAreas.push_back(rect);
-            }
-        }
     }
     readNumber(properties, "edgeMarginDip", settings.edgeMarginDip, invalid);
     if (const auto found = properties.find("monitorMode"); found != properties.end()) {
@@ -399,16 +419,24 @@ SettingsLoadResult deserializeSettings(const std::string& text) {
     if (const auto found = properties.find("fixedMonitorKey"); found != properties.end()) {
         settings.fixedMonitorKey = unescapeValue(found->second);
     }
-    if (const auto found = properties.find("preferredPosition"); found != properties.end()) {
-        if (!parsePoint(found->second, settings.preferredPosition)) invalid = true;
-    }
-    readBool(properties, "preferredPositionEnabled", settings.preferredPositionEnabled, invalid);
     readBool(properties, "hideInFullscreen", settings.hideInFullscreen, invalid);
     readBool(properties, "launchAtStartup", settings.launchAtStartup, invalid);
     readBool(properties, "hotkeyEnabled", settings.hotkeyEnabled, invalid);
     readBool(properties, "clockVisible", settings.clockVisible, invalid);
     readNumber(properties, "boostOpacity", settings.boostOpacity, invalid);
     readNumber(properties, "boostDurationSeconds", settings.boostDurationSeconds, invalid);
+
+    if (version < 4) {
+        // Translate the previous shipped defaults, but retain deliberate custom
+        // values. This prevents an upgrade from looking as if the new slower,
+        // edge-flush defaults did not take effect.
+        if (legacyIntervalMinutes == 5) settings.movementIntervalSeconds = 3600;
+        else if (legacyIntervalMinutes == 120) settings.movementIntervalSeconds = 24 * 60 * 60;
+        if (std::abs(settings.edgeMarginDip - 24.0) < 0.005 ||
+            std::abs(settings.edgeMarginDip - 32.0) < 0.005) {
+            settings.edgeMarginDip = 0.0;
+        }
+    }
 
     settings.validateAndNormalize();
     if (invalid) {
